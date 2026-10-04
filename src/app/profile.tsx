@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -16,6 +15,7 @@ import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { Role, useAuth } from '@/lib/auth';
 import { colors } from '@/lib/theme';
+import { confirmAction } from '@/lib/confirm';
 
 const ROLE_LABEL: Record<Role, string> = { athlete: 'Atleta', coach: 'Allenatore' };
 
@@ -117,42 +117,34 @@ export default function Profile() {
       const owned = data?.length ?? 0;
 
       if (owned > 0) {
-        Alert.alert(
-          'Diventare atleta?',
-          `Hai creato ${owned} ${owned === 1 ? 'gruppo' : 'gruppi'}. Passando ad atleta ${
+        confirmAction({
+          title: 'Diventare atleta?',
+          message: `Hai creato ${owned} ${owned === 1 ? 'gruppo' : 'gruppi'}. Passando ad atleta ${
             owned === 1 ? 'verrà eliminato' : 'verranno eliminati'
           } definitivamente, insieme a tutti gli allenamenti e ai feedback. L'operazione non si può annullare.`,
-          [
-            { text: 'Annulla', style: 'cancel' },
-            {
-              text: 'Elimina e continua',
-              style: 'destructive',
-              onPress: () => applyRole('athlete', true),
-            },
-          ]
-        );
+          confirmText: 'Elimina e continua',
+          destructive: true,
+          onConfirm: () => applyRole('athlete', true),
+        });
         return;
       }
 
-      Alert.alert(
-        'Diventare atleta?',
-        'Potrai entrare nei gruppi con un codice e scrivere i tuoi feedback.',
-        [
-          { text: 'Annulla', style: 'cancel' },
-          { text: 'Conferma', onPress: () => applyRole('athlete', false) },
-        ]
-      );
+      confirmAction({
+        title: 'Diventare atleta?',
+        message: 'Potrai entrare nei gruppi con un codice e scrivere i tuoi feedback.',
+        confirmText: 'Conferma',
+        onConfirm: () => applyRole('athlete', false),
+      });
       return;
     }
 
-    Alert.alert(
-      'Diventare allenatore?',
-      "Potrai creare gruppi e scrivere gli allenamenti. Nei gruppi a cui partecipi ora come atleta avrai l'accesso in sola lettura e i tuoi feedback non saranno più visibili all'allenatore.",
-      [
-        { text: 'Annulla', style: 'cancel' },
-        { text: 'Conferma', onPress: () => applyRole('coach', false) },
-      ]
-    );
+    confirmAction({
+      title: 'Diventare allenatore?',
+      message:
+        "Potrai creare gruppi e scrivere gli allenamenti. Nei gruppi a cui partecipi ora come atleta avrai l'accesso in sola lettura e i tuoi feedback non saranno più visibili all'allenatore.",
+      confirmText: 'Conferma',
+      onConfirm: () => applyRole('coach', false),
+    });
   }
 
   const nameChanged = name.trim() !== (profile?.name ?? '');

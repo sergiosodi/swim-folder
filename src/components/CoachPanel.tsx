@@ -3,8 +3,8 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 
 import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
+import { SLOT_LOWER, Slot } from '@/lib/sessions';
 import type { MyEntry } from './AthletePanel';
-import { KEYBOARD_BAR_ID } from './KeyboardDone';
 
 export type AthleteFeedback = {
   userId: string;
@@ -15,6 +15,7 @@ export type AthleteFeedback = {
 type Props = {
   groupId: string;
   date: string;
+  slot: Slot;
   initialText: string;
   feedback: AthleteFeedback[];
   onSaved: (date: string, text: string) => void;
@@ -22,7 +23,7 @@ type Props = {
 
 const GREEN = '#2E7D32';
 
-export default function CoachPanel({ groupId, date, initialText, feedback, onSaved }: Props) {
+export default function CoachPanel({ groupId, date, slot, initialText, feedback, onSaved }: Props) {
   const router = useRouter();
   const [text, setText] = useState(initialText);
   const [busy, setBusy] = useState(false);
@@ -39,10 +40,11 @@ export default function CoachPanel({ groupId, date, initialText, feedback, onSav
       {
         group_id: groupId,
         date,
+        slot,
         description: clean,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: 'group_id,date' }
+      { onConflict: 'group_id,date,slot' }
     );
 
     setBusy(false);
@@ -60,7 +62,7 @@ export default function CoachPanel({ groupId, date, initialText, feedback, onSav
 
   return (
     <View>
-      <Text style={styles.sectionLabel}>Allenamento del giorno</Text>
+      <Text style={styles.sectionLabel}>Allenamento di {SLOT_LOWER[slot]}</Text>
       <TextInput
         style={styles.input}
         value={text}
@@ -69,12 +71,11 @@ export default function CoachPanel({ groupId, date, initialText, feedback, onSav
           setSaved(false);
           setError(null);
         }}
-        placeholder="Scrivi qui l'allenamento di questo giorno..."
+        placeholder={`Scrivi qui l'allenamento di ${SLOT_LOWER[slot]}...`}
         placeholderTextColor={colors.muted}
         multiline
         maxLength={4000}
         textAlignVertical="top"
-        inputAccessoryViewID={KEYBOARD_BAR_ID}
       />
 
       {error && <Text style={styles.error}>{error}</Text>}
@@ -113,7 +114,7 @@ export default function CoachPanel({ groupId, date, initialText, feedback, onSav
                 onPress={() =>
                   router.push({
                     pathname: '/feedback',
-                    params: { groupId, userId: f.userId, date },
+                    params: { groupId, userId: f.userId, date, slot },
                   })
                 }
               >

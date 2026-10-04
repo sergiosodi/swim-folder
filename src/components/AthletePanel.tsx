@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
+import { SLOT_LOWER, Slot } from '@/lib/sessions';
 import FatiguePicker from './FatiguePicker';
 import { KEYBOARD_BAR_ID } from './KeyboardDone';
 
@@ -15,6 +16,7 @@ type Props = {
   groupId: string;
   userId: string;
   date: string;
+  slot: Slot;
   workoutText: string;
   initial: MyEntry | null;
   onSaved: (date: string, entry: MyEntry) => void;
@@ -46,6 +48,7 @@ export default function AthletePanel({
   groupId,
   userId,
   date,
+  slot,
   workoutText,
   initial,
   onSaved,
@@ -78,12 +81,13 @@ export default function AthletePanel({
         group_id: groupId,
         user_id: userId,
         date,
+        slot,
         present: entry.present,
         comment: entry.comment,
         fatigue: entry.fatigue,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: 'group_id,user_id,date' }
+      { onConflict: 'group_id,user_id,date,slot' }
     );
 
     setBusy(false);
@@ -116,13 +120,13 @@ export default function AthletePanel({
         />
       </View>
 
-      <Text style={styles.sectionLabel}>Allenamento</Text>
+      <Text style={styles.sectionLabel}>Allenamento di {SLOT_LOWER[slot]}</Text>
       <View style={styles.box}>
         {workoutText.trim() ? (
           <Text style={styles.workout}>{workoutText}</Text>
         ) : (
           <Text style={styles.muted}>
-            L'allenatore non ha ancora scritto l'allenamento di questo giorno.
+            L'allenatore non ha ancora scritto questo allenamento.
           </Text>
         )}
       </View>

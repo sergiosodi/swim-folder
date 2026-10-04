@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -12,7 +12,8 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { colors } from '@/lib/theme';
@@ -26,15 +27,36 @@ import {
   todayISO,
   weekDays,
 } from '@/lib/dates';
+import {
+  DEFAULT_AFTERNOON_DAYS,
+  Overrides,
+  SLOTS,
+  SLOT_LABEL,
+  SLOT_LOWER,
+  SessionDays,
+  Slot,
+  defaultHasSession,
+  hasSession,
+  slotKey,
+} from '@/lib/sessions';
+import { confirmAction } from '@/lib/confirm';
 import AthletePanel, { MyEntry } from '@/components/AthletePanel';
 import CoachPanel, { AthleteFeedback } from '@/components/CoachPanel';
 import MonthCalendar from '@/components/MonthCalendar';
 import KeyboardDone from '@/components/KeyboardDone';
 
-type Group = { id: string; name: string; code: string; owner_id: string };
+type Group = {
+  id: string;
+  name: string;
+  code: string;
+  owner_id: string;
+  morning_days: number[];
+  afternoon_days: number[];
+};
 type EntryRow = {
   user_id: string;
   date: string;
+  slot: Slot;
   present: boolean;
   comment: string | null;
   fatigue: number | null;
@@ -52,6 +74,7 @@ export default function GroupScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const [selected, setSelected] = useState(todayISO());
+  const [selectedSlot, setSelectedSlot] = useState<Slot>('afternoon');
   const [calOpen, setCalOpen] = useState(false);
   const weekStart = startOfWeek(selected);
   const days = weekDays(weekStart);
@@ -59,12 +82,21 @@ export default function GroupScreen() {
   const [workouts, setWorkouts] = useState<Record<string, string>>({});
   const [entries, setEntries] = useState<EntryRow[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [overrides, setOverrides] = useState<Overrides>({});
   const [dataWeek, setDataWeek] = useState<string | null>(null);
   const reqRef = useRef(0);
+
+  const [busySession, setBusySession] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const isOwner = !!group && group.owner_id === uid;
   const isAthlete = profile?.role === 'athlete';
   const ready = dataWeek === weekStart;
+  const sessionDays: SessionDays = {
+    morning: group?.morning_days ?? [],
+    afternoon: group?.afternoon_days ?? DEFAULT_AFTERNOON_DAYS,
+  };
 
   function goWeek(delta: number) {
     setSelected(addDays(selected, delta * 7));
@@ -85,26 +117,35 @@ export default function GroupScreen() {
     })
   ).current;
 
-  // 1) Carica il gruppo
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      const { data, error: err } = await supabase
-        .from('groups')
-        .select('id, name, code, owner_id')
-        .eq('id', id)
-        .maybeSingle();
-      if (!active) return;
-      if (err) setError(err.message);
-      else setGroup((data as Group | null) ?? null);
-      setGroupLoading(false);
-    })();
-    return () => {
-      active = false;
-    };
-  }, [id]);
+  // 1) Carica il gruppo (anche quando si torna da Impostazioni)
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      (async () => {
+        const { data, error: err } = await supabase
+          .from('groups')
+          .select('id, name, code, owner_id, morning_days, afternoon_days')
+          .eq('id', id)
+          .maybeSingle();
+        if (!active) return;
+        if (err) setError(err.message);
+        else if (data) {
+          const g = data as Group;
+          setGroup({
+            ...g,
+            morning_days: g.morning_days ?? [],
+            afternoon_days: g.afternoon_days ?? DEFAULT_AFTERNOON_DAYS,
+          });
+        } else setGroup(null);
+        setGroupLoading(false);
+      })();
+      return () => {
+        active = false;
+      };
+    }, [id])
+  );
 
-  // 2) Carica i dati della settimana mostrata
+  // 2) Carica i dati della settimana mostrata (si aggiorna anche a ogni ritorno sulla schermata)
   useEffect(() => {
     if (!group) return;
     const req = ++reqRef.current;
@@ -114,7 +155,14 @@ export default function GroupScreen() {
     (async () => {
       const workoutsReq: any = supabase
         .from('workouts')
-        .select('date, description')
+        .select('date, slot, description')
+        .eq('group_id', group.id)
+        .gte('date', weekStart)
+        .lte('date', to);
+
+      const overridesReq: any = supabase
+        .from('session_overrides')
+        .select('date, slot, enabled')
         .eq('group_id', group.id)
         .gte('date', weekStart)
         .lte('date', to);
@@ -123,14 +171,14 @@ export default function GroupScreen() {
       if (isOwner) {
         entriesReq = supabase
           .from('entries')
-          .select('user_id, date, present, comment, fatigue')
+          .select('user_id, date, slot, present, comment, fatigue')
           .eq('group_id', group.id)
           .gte('date', weekStart)
           .lte('date', to);
       } else if (isAthlete) {
         entriesReq = supabase
           .from('entries')
-          .select('user_id, date, present, comment, fatigue')
+          .select('user_id, date, slot, present, comment, fatigue')
           .eq('group_id', group.id)
           .eq('user_id', uid)
           .gte('date', weekStart)
@@ -144,18 +192,25 @@ export default function GroupScreen() {
             .eq('group_id', group.id)
         : empty;
 
-      const [w, e, m] = await Promise.all([workoutsReq, entriesReq, membersReq]);
+      const [w, o, e, m] = await Promise.all([workoutsReq, overridesReq, entriesReq, membersReq]);
       if (req !== reqRef.current) return;
 
-      const firstError = w.error ?? e.error ?? m.error;
+      const firstError = w.error ?? o.error ?? e.error ?? m.error;
       if (firstError) setError('Non riesco a caricare i dati: ' + firstError.message);
       else setError(null);
 
       const wMap: Record<string, string> = {};
-      ((w.data ?? []) as { date: string; description: string }[]).forEach((r) => {
-        wMap[r.date] = r.description;
+      ((w.data ?? []) as { date: string; slot: Slot; description: string }[]).forEach((r) => {
+        wMap[slotKey(r.date, r.slot)] = r.description;
       });
       setWorkouts(wMap);
+
+      const oMap: Overrides = {};
+      ((o.data ?? []) as { date: string; slot: Slot; enabled: boolean }[]).forEach((r) => {
+        oMap[slotKey(r.date, r.slot)] = r.enabled;
+      });
+      setOverrides(oMap);
+
       setEntries((e.data ?? []) as EntryRow[]);
 
       const list: Member[] = ((m.data ?? []) as any[])
@@ -176,22 +231,77 @@ export default function GroupScreen() {
     })();
   }, [group, weekStart, isOwner, isAthlete, uid]);
 
-  function onWorkoutSaved(date: string, text: string) {
-    setWorkouts((prev) => ({ ...prev, [date]: text }));
+  function onWorkoutSaved(date: string, slot: Slot, text: string) {
+    setWorkouts((prev) => ({ ...prev, [slotKey(date, slot)]: text }));
   }
 
-  function onEntrySaved(date: string, entry: MyEntry) {
+  function onEntrySaved(date: string, slot: Slot, entry: MyEntry) {
     setEntries((prev) => [
-      ...prev.filter((r) => !(r.user_id === uid && r.date === date)),
-      { user_id: uid, date, ...entry },
+      ...prev.filter((r) => !(r.user_id === uid && r.date === date && r.slot === slot)),
+      { user_id: uid, date, slot, ...entry },
     ]);
+  }
+
+  // Aggiunge o toglie un allenamento in un giorno preciso
+  async function setSessionState(date: string, slot: Slot, enabled: boolean) {
+    if (!group || busySession) return;
+    setBusySession(true);
+    setSessionError(null);
+
+    const isDefault = enabled === defaultHasSession(date, slot, sessionDays);
+    const { error: err } = isDefault
+      ? await supabase
+          .from('session_overrides')
+          .delete()
+          .eq('group_id', group.id)
+          .eq('date', date)
+          .eq('slot', slot)
+      : await supabase
+          .from('session_overrides')
+          .upsert({ group_id: group.id, date, slot, enabled }, { onConflict: 'group_id,date,slot' });
+
+    setBusySession(false);
+    if (err) {
+      setSessionError('Non sono riuscito a modificare il calendario: ' + err.message);
+      return;
+    }
+
+    setOverrides((prev) => {
+      const next = { ...prev };
+      const k = slotKey(date, slot);
+      if (isDefault) delete next[k];
+      else next[k] = enabled;
+      return next;
+    });
+  }
+
+  function askRemoveSession(date: string, slot: Slot) {
+    confirmAction({
+      title: 'Togliere questo allenamento?',
+      message: `L'allenamento di ${SLOT_LOWER[slot]} di ${formatLongDate(
+        date
+      )} sparirà dal calendario. Il testo e i feedback già scritti restano salvati e riappaiono se lo aggiungi di nuovo.`,
+      confirmText: 'Togli allenamento',
+      destructive: true,
+      onConfirm: () => setSessionState(date, slot, false),
+    });
   }
 
   async function shareCode() {
     if (!group) return;
-    await Share.share({
-      message: `Entra nel mio gruppo "${group.name}" su Swim Folder con il codice: ${group.code}`,
-    });
+    const message = `Entra nel mio gruppo "${group.name}" su Swim Folder con il codice: ${group.code}`;
+    try {
+      const nav: any = (globalThis as any).navigator;
+      if (Platform.OS === 'web' && !(nav && nav.share)) {
+        await nav?.clipboard?.writeText(message);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2500);
+        return;
+      }
+      await Share.share({ message });
+    } catch {
+      // condivisione annullata: niente da fare
+    }
   }
 
   function goBack() {
@@ -199,7 +309,6 @@ export default function GroupScreen() {
     else router.replace('/');
   }
 
-  const workoutText = workouts[selected] ?? '';
   const isCurrentWeek = startOfWeek(todayISO()) === weekStart;
 
   function renderDayPanel() {
@@ -212,67 +321,167 @@ export default function GroupScreen() {
       );
     }
 
-    if (isOwner) {
-      const feedback: AthleteFeedback[] = members.map((m) => {
-        const e = entries.find((r) => r.user_id === m.userId && r.date === selected);
-        return {
-          userId: m.userId,
-          name: m.name,
-          entry: e ? { present: e.present, comment: e.comment, fatigue: e.fatigue } : null,
-        };
-      });
-      return (
-        <CoachPanel
-          key={selected}
-          groupId={group.id}
-          date={selected}
-          initialText={workoutText}
-          feedback={feedback}
-          onSaved={onWorkoutSaved}
-        />
-      );
+    const existing = SLOTS.filter((s) => hasSession(selected, s, sessionDays, overrides));
+    const tabs: Slot[] = isOwner ? SLOTS : existing;
+    const slot: Slot | null = isOwner
+      ? selectedSlot
+      : existing.includes(selectedSlot)
+      ? selectedSlot
+      : existing[0] ?? null;
+
+    const tabsView =
+      tabs.length > 1 ? (
+        <View style={styles.slotRow}>
+          {tabs.map((s) => {
+            const on = s === slot;
+            const exists = existing.includes(s);
+            return (
+              <Pressable
+                key={s}
+                style={[styles.slotButton, on && styles.slotButtonOn]}
+                onPress={() => setSelectedSlot(s)}
+              >
+                <Text
+                  style={[
+                    styles.slotText,
+                    on && styles.slotTextOn,
+                    !exists && !on && styles.slotTextOff,
+                  ]}
+                >
+                  {SLOT_LABEL[s]}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null;
+
+    if (!slot) {
+      return <Text style={styles.muted}>Nessun allenamento in questo giorno.</Text>;
     }
 
-    if (isAthlete) {
-      const mine = entries.find((r) => r.user_id === uid && r.date === selected);
-      return (
+    const exists = existing.includes(slot);
+    const workoutText = workouts[slotKey(selected, slot)] ?? '';
+    const panelKey = `${selected}|${slot}`;
+
+    let body: React.ReactNode;
+
+    if (isOwner) {
+      if (!exists) {
+        body = (
+          <View style={styles.emptyBox}>
+            <Text style={styles.muted}>
+              Nessun allenamento di {SLOT_LOWER[slot]} in questo giorno.
+            </Text>
+            <Pressable
+              style={[styles.addButton, busySession && styles.buttonDisabled]}
+              onPress={() => setSessionState(selected, slot, true)}
+              disabled={busySession}
+            >
+              <Text style={styles.addButtonText}>Aggiungi allenamento di {SLOT_LOWER[slot]}</Text>
+            </Pressable>
+          </View>
+        );
+      } else {
+        const feedback: AthleteFeedback[] = members.map((m) => {
+          const e = entries.find(
+            (r) => r.user_id === m.userId && r.date === selected && r.slot === slot
+          );
+          return {
+            userId: m.userId,
+            name: m.name,
+            entry: e ? { present: e.present, comment: e.comment, fatigue: e.fatigue } : null,
+          };
+        });
+        body = (
+          <>
+            <CoachPanel
+              key={panelKey}
+              groupId={group.id}
+              date={selected}
+              slot={slot}
+              initialText={workoutText}
+              feedback={feedback}
+              onSaved={(d, t) => onWorkoutSaved(d, slot, t)}
+            />
+            <Pressable
+              style={[styles.removeButton, busySession && styles.buttonDisabled]}
+              onPress={() => askRemoveSession(selected, slot)}
+              disabled={busySession}
+            >
+              <Text style={styles.removeButtonText}>
+                Togli l'allenamento di {SLOT_LOWER[slot]} da questo giorno
+              </Text>
+            </Pressable>
+          </>
+        );
+      }
+    } else if (isAthlete) {
+      const mine = entries.find(
+        (r) => r.user_id === uid && r.date === selected && r.slot === slot
+      );
+      body = (
         <AthletePanel
-          key={selected}
+          key={panelKey}
           groupId={group.id}
           userId={uid}
           date={selected}
+          slot={slot}
           workoutText={workoutText}
           initial={
             mine ? { present: mine.present, comment: mine.comment, fatigue: mine.fatigue } : null
           }
-          onSaved={onEntrySaved}
+          onSaved={(d, entry) => onEntrySaved(d, slot, entry)}
         />
+      );
+    } else {
+      // Allenatore che ha solo il codice: sola lettura
+      body = (
+        <View>
+          <Text style={styles.sectionLabel}>Allenamento di {SLOT_LOWER[slot]}</Text>
+          <View style={styles.box}>
+            {workoutText.trim() ? (
+              <Text style={styles.workout}>{workoutText}</Text>
+            ) : (
+              <Text style={styles.muted}>Nessun allenamento scritto.</Text>
+            )}
+          </View>
+          <Text style={[styles.muted, { marginTop: 14 }]}>
+            Hai accesso a questo gruppo in sola lettura.
+          </Text>
+        </View>
       );
     }
 
-    // Allenatore che ha solo il codice: sola lettura
     return (
       <View>
-        <Text style={styles.sectionLabel}>Allenamento</Text>
-        <View style={styles.box}>
-          {workoutText.trim() ? (
-            <Text style={styles.workout}>{workoutText}</Text>
-          ) : (
-            <Text style={styles.muted}>Nessun allenamento scritto per questo giorno.</Text>
-          )}
-        </View>
-        <Text style={[styles.muted, { marginTop: 14 }]}>
-          Hai accesso a questo gruppo in sola lettura.
-        </Text>
+        {tabsView}
+        {sessionError && <Text style={styles.error}>{sessionError}</Text>}
+        {body}
       </View>
     );
   }
 
   return (
     <SafeAreaView style={styles.safe}>
-      <Pressable onPress={goBack} style={styles.back} hitSlop={10}>
-        <Text style={styles.backText}>‹ Indietro</Text>
-      </Pressable>
+      <View style={styles.topBar}>
+        <Pressable onPress={goBack} hitSlop={10}>
+          <Text style={styles.backText}>‹ Indietro</Text>
+        </Pressable>
+
+        {group && (
+          <Pressable
+            style={styles.gearButton}
+            onPress={() =>
+              router.push({ pathname: '/group-settings', params: { groupId: group.id } })
+            }
+            hitSlop={10}
+            accessibilityLabel="Impostazioni del gruppo"
+          >
+            <Ionicons name="settings-outline" size={26} color={colors.primary} />
+          </Pressable>
+        )}
+      </View>
 
       {groupLoading ? (
         <View style={styles.center}>
@@ -295,34 +504,17 @@ export default function GroupScreen() {
             <Text style={styles.title}>{group.name}</Text>
 
             {isOwner && (
-              <>
-                <View style={styles.codeCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.codeLabel}>Codice gruppo</Text>
-                    <Text selectable style={styles.code}>
-                      {group.code}
-                    </Text>
-                  </View>
-                  <Pressable style={styles.shareButton} onPress={shareCode}>
-                    <Text style={styles.shareText}>Condividi</Text>
-                  </Pressable>
-                </View>
-
-                <Pressable
-                  style={styles.athletesButton}
-                  onPress={() =>
-                    router.push({
-                      pathname: '/athletes',
-                      params: { groupId: group.id, groupName: group.name },
-                    })
-                  }
-                >
-                  <Text style={styles.athletesText}>
-                    Atleti del gruppo{ready ? ` (${members.length})` : ''}
+              <View style={styles.codeCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.codeLabel}>Codice gruppo</Text>
+                  <Text selectable style={styles.code}>
+                    {group.code}
                   </Text>
-                  <Text style={styles.chevron}>›</Text>
+                </View>
+                <Pressable style={styles.shareButton} onPress={shareCode}>
+                  <Text style={styles.shareText}>{copied ? 'Copiato ✓' : 'Condividi'}</Text>
                 </Pressable>
-              </>
+              </View>
             )}
 
             <View style={styles.weekHeader}>
@@ -350,7 +542,15 @@ export default function GroupScreen() {
               {days.map((d, i) => {
                 const isSel = d === selected;
                 const isToday = d === todayISO();
-                const hasWorkout = ready && !!workouts[d]?.trim();
+                const hasAny = SLOTS.some((s) => hasSession(d, s, sessionDays, overrides));
+                const written = (s: Slot) =>
+                  ready &&
+                  hasSession(d, s, sessionDays, overrides) &&
+                  !!workouts[slotKey(d, s)]?.trim();
+                const dotStyle = (on: boolean) => [
+                  styles.dot,
+                  on && (isSel ? styles.dotOnSel : styles.dotOn),
+                ];
                 return (
                   <Pressable
                     key={d}
@@ -358,6 +558,7 @@ export default function GroupScreen() {
                       styles.day,
                       isToday && styles.dayToday,
                       isSel && styles.daySelected,
+                      ready && !hasAny && styles.dayRest,
                     ]}
                     onPress={() => setSelected(d)}
                   >
@@ -367,12 +568,10 @@ export default function GroupScreen() {
                     <Text style={[styles.dayNumber, isSel && styles.dayTextSel]}>
                       {dayNumber(d)}
                     </Text>
-                    <View
-                      style={[
-                        styles.dot,
-                        hasWorkout && (isSel ? styles.dotOnSel : styles.dotOn),
-                      ]}
-                    />
+                    <View style={styles.dots}>
+                      <View style={dotStyle(written('morning'))} />
+                      <View style={dotStyle(written('afternoon'))} />
+                    </View>
                   </Pressable>
                 );
               })}
@@ -399,8 +598,15 @@ export default function GroupScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  back: { paddingHorizontal: 20, paddingTop: 12 },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 12,
+  },
   backText: { color: colors.primary, fontSize: 17 },
+  gearButton: { padding: 2 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   content: { padding: 20, paddingBottom: 60 },
   title: { fontSize: 28, fontWeight: '700', color: colors.text, marginBottom: 16 },
@@ -415,7 +621,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderRadius: 14,
     padding: 14,
-    marginBottom: 10,
+    marginBottom: 20,
   },
   codeLabel: { fontSize: 13, color: colors.muted },
   code: { fontSize: 26, fontWeight: '700', letterSpacing: 5, color: colors.primary, marginTop: 2 },
@@ -427,20 +633,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   shareText: { color: colors.primary, fontSize: 15, fontWeight: '600' },
-
-  athletesButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    marginBottom: 20,
-  },
-  athletesText: { flex: 1, fontSize: 16, fontWeight: '600', color: colors.text },
-  chevron: { fontSize: 26, color: colors.muted, lineHeight: 28 },
 
   weekHeader: {
     flexDirection: 'row',
@@ -465,15 +657,60 @@ const styles = StyleSheet.create({
   },
   dayToday: { borderColor: colors.primary },
   daySelected: { backgroundColor: colors.primary, borderColor: colors.primary },
+  dayRest: { opacity: 0.5 },
   dayLabel: { fontSize: 12, color: colors.muted },
   dayNumber: { fontSize: 18, fontWeight: '700', color: colors.text, marginTop: 2 },
   dayTextSel: { color: '#fff' },
-  dot: { width: 6, height: 6, borderRadius: 3, marginTop: 6, backgroundColor: 'transparent' },
+  dots: { flexDirection: 'row', gap: 3, marginTop: 6 },
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: 'transparent' },
   dotOn: { backgroundColor: colors.primary },
   dotOnSel: { backgroundColor: '#fff' },
 
   dayTitle: { fontSize: 20, fontWeight: '700', color: colors.text, marginBottom: 14 },
   panelLoading: { paddingVertical: 40, alignItems: 'center' },
+
+  slotRow: { flexDirection: 'row', gap: 10, marginBottom: 18 },
+  slotButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    alignItems: 'center',
+  },
+  slotButtonOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  slotText: { fontSize: 15, fontWeight: '600', color: colors.text },
+  slotTextOn: { color: '#fff' },
+  slotTextOff: { color: colors.muted },
+
+  emptyBox: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    gap: 14,
+  },
+  addButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+  },
+  addButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  removeButton: {
+    marginTop: 30,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  removeButtonText: { color: colors.danger, fontSize: 15, fontWeight: '600' },
+  buttonDisabled: { opacity: 0.6 },
+
   sectionLabel: { fontSize: 15, fontWeight: '600', color: colors.text, marginBottom: 8 },
   box: {
     backgroundColor: colors.card,

@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
 import { formatLongDate } from '@/lib/dates';
+import { SLOT_LABEL, Slot } from '@/lib/sessions';
 
 type Entry = { present: boolean; comment: string | null; fatigue: number | null };
 
@@ -12,11 +13,13 @@ const GREEN = '#2E7D32';
 
 export default function FeedbackDetail() {
   const router = useRouter();
-  const { groupId, userId, date } = useLocalSearchParams<{
+  const { groupId, userId, date, slot } = useLocalSearchParams<{
     groupId: string;
     userId: string;
     date: string;
+    slot?: string;
   }>();
+  const slotValue: Slot = slot === 'morning' ? 'morning' : 'afternoon';
 
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
@@ -33,6 +36,7 @@ export default function FeedbackDetail() {
           .eq('group_id', groupId)
           .eq('user_id', userId)
           .eq('date', date)
+          .eq('slot', slotValue)
           .maybeSingle(),
         supabase.from('profiles').select('name').eq('id', userId).maybeSingle(),
       ]);
@@ -45,7 +49,7 @@ export default function FeedbackDetail() {
     return () => {
       active = false;
     };
-  }, [groupId, userId, date]);
+  }, [groupId, userId, date, slotValue]);
 
   function goBack() {
     if (router.canGoBack()) router.back();
@@ -67,12 +71,14 @@ export default function FeedbackDetail() {
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
           <Text style={styles.title}>{name}</Text>
-          <Text style={styles.date}>{date ? formatLongDate(date) : ''}</Text>
+          <Text style={styles.date}>
+            {date ? formatLongDate(date) : ''} · {SLOT_LABEL[slotValue]}
+          </Text>
 
           {error && <Text style={styles.error}>{error}</Text>}
 
           {!available ? (
-            <Text style={styles.muted}>Nessun feedback disponibile per questo giorno.</Text>
+            <Text style={styles.muted}>Nessun feedback disponibile per questo allenamento.</Text>
           ) : (
             <>
               <View style={styles.card}>
