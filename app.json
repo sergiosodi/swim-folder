@@ -1,14 +1,14 @@
 {
   "expo": {
-    "name": "swim-folder",
+    "name": "Swim Folder",
     "slug": "swim-folder",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/imgswimfolder.jpeg",
+    "icon": "./assets/images/icon.png",
     "scheme": "swimfolder",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/imgswimfolder.jpeg"
+      "icon": "./assets/expo.icon"
     },
     "android": {
       "adaptiveIcon": {
@@ -21,7 +21,7 @@
     },
     "web": {
       "output": "single",
-      "favicon": "./assets/images/imgswimfolder.jpeg"
+      "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
@@ -29,7 +29,7 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#208AEF",
-          "image": "./assets/images/imgswimfolder.jpeg",
+          "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
       ]
