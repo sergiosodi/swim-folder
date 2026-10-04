@@ -8,7 +8,7 @@
     "scheme": "swimfolder",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/imgswimfolder.jpeg"
     },
     "android": {
       "adaptiveIcon": {
