@@ -149,7 +149,7 @@ export default function AthletePanel({
             inputAccessoryViewID={KEYBOARD_BAR_ID}
           />
 
-          <Text style={styles.sectionLabel}>FATICA GENERALE</Text>
+          <Text style={styles.sectionLabel}>RPE</Text>
           <Text style={styles.hint}>Tocca il campo e scegli un valore da 0 a 10.</Text>
           <FatiguePicker
             value={fatigue}

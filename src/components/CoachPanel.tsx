@@ -137,7 +137,7 @@ export default function CoachPanel({ groupId, date, slot, initialText, feedback,
 
                 {f.entry?.present && (
                   <Text style={styles.fatigue}>
-                    FATICA GENERALE:{' '}
+                    RPE:{' '}
                     <Text style={styles.fatigueValue}>
                       {f.entry.fatigue != null ? `${f.entry.fatigue}/10` : 'non inserita'}
                     </Text>

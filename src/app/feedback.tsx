@@ -87,7 +87,7 @@ export default function FeedbackDetail() {
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.label}>FATICA GENERALE</Text>
+                <Text style={styles.label}>RPE</Text>
                 {entry!.fatigue != null ? (
                   <Text style={styles.fatigue}>
                     {entry!.fatigue}

@@ -41,7 +41,7 @@ export default function FatiguePicker({ value, onChange }: Props) {
       >
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
           <Pressable style={styles.sheet} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>FATICA GENERALE</Text>
+            <Text style={styles.sheetTitle}>RPE</Text>
             <ScrollView
               ref={ref}
               style={styles.list}
