@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
 import { formatLongDate } from '@/lib/dates';
 import { SLOT_LABEL, Slot } from '@/lib/sessions';
+import PolarChart from '@/components/PolarChart';
 
 type Entry = { present: boolean; comment: string | null; fatigue: number | null };
 
@@ -106,6 +107,8 @@ export default function FeedbackDetail() {
                   <Text style={styles.notSet}>Nessun commento.</Text>
                 )}
               </View>
+
+              <PolarChart userId={userId} date={date} slot={slotValue} />
             </>
           )}
         </ScrollView>

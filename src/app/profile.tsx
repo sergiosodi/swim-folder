@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -11,13 +12,19 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { Role, useAuth } from '@/lib/auth';
 import { colors } from '@/lib/theme';
 import { confirmAction } from '@/lib/confirm';
 
 const ROLE_LABEL: Record<Role, string> = { athlete: 'Atleta', coach: 'Allenatore' };
+
+const POLAR_RETURN: Record<string, string> = {
+  ok: 'Polar collegato ✓',
+  annullato: 'Collegamento con Polar annullato.',
+  errore: 'Non sono riuscito a collegare Polar. Riprova.',
+};
 
 function RoleOption({
   label,
@@ -46,6 +53,7 @@ function RoleOption({
 
 export default function Profile() {
   const router = useRouter();
+  const { polar } = useLocalSearchParams<{ polar?: string }>();
   const { session, profile, refreshProfile, signOut } = useAuth();
   const uid = session?.user.id ?? '';
 
@@ -56,6 +64,28 @@ export default function Profile() {
 
   const [busyRole, setBusyRole] = useState(false);
   const [roleError, setRoleError] = useState<string | null>(null);
+
+  const [polarConnected, setPolarConnected] = useState<boolean | null>(null);
+  const [polarBusy, setPolarBusy] = useState(false);
+  const [polarMsg, setPolarMsg] = useState<string | null>(polar ? POLAR_RETURN[polar] ?? null : null);
+  const [polarError, setPolarError] = useState<string | null>(null);
+
+  const loadPolar = useCallback(async () => {
+    if (!uid) return;
+    const { data } = await supabase
+      .from('polar_connections')
+      .select('user_id')
+      .eq('user_id', uid)
+      .maybeSingle();
+    setPolarConnected(!!data);
+  }, [uid]);
+
+  // Si aggiorna ogni volta che si torna sulla schermata (anche dopo il collegamento)
+  useFocusEffect(
+    useCallback(() => {
+      loadPolar();
+    }, [loadPolar])
+  );
 
   function goBack() {
     if (router.canGoBack()) router.back();
@@ -147,7 +177,74 @@ export default function Profile() {
     });
   }
 
+  // ----- Polar -----
+
+  async function connectPolar() {
+    if (polarBusy) return;
+    setPolarBusy(true);
+    setPolarError(null);
+    setPolarMsg(null);
+    const { data, error } = await supabase.functions.invoke('polar', {
+      body: { action: 'connect' },
+    });
+    setPolarBusy(false);
+    if (error || !data?.url) {
+      setPolarError('Non riesco ad avviare il collegamento con Polar.');
+      return;
+    }
+    if (Platform.OS === 'web') {
+      (globalThis as any).location.href = data.url as string;
+    } else {
+      Linking.openURL(data.url as string);
+    }
+  }
+
+  async function syncPolar() {
+    if (polarBusy) return;
+    setPolarBusy(true);
+    setPolarError(null);
+    setPolarMsg(null);
+    const { data, error } = await supabase.functions.invoke('polar', {
+      body: { action: 'sync' },
+    });
+    setPolarBusy(false);
+    if (error) {
+      setPolarError('Non sono riuscito ad aggiornare i dati da Polar.');
+      return;
+    }
+    const n = (data as { count?: number } | null)?.count ?? 0;
+    setPolarMsg(n > 0 ? `Dati aggiornati (${n} allenamenti) ✓` : 'Nessun nuovo allenamento da Polar.');
+  }
+
+  async function doDisconnectPolar() {
+    setPolarBusy(true);
+    setPolarError(null);
+    setPolarMsg(null);
+    const { error } = await supabase.functions.invoke('polar', {
+      body: { action: 'disconnect' },
+    });
+    setPolarBusy(false);
+    if (error) {
+      setPolarError('Non sono riuscito a scollegare Polar.');
+      return;
+    }
+    setPolarConnected(false);
+    setPolarMsg('Polar scollegato. I dati salvati sono stati cancellati.');
+  }
+
+  function askDisconnectPolar() {
+    confirmAction({
+      title: 'Scollegare Polar?',
+      message:
+        "I grafici Polar già salvati nell'app verranno cancellati e non ne arriveranno altri finché non ricolleghi il sensore.",
+      confirmText: 'Scollega',
+      destructive: true,
+      onConfirm: doDisconnectPolar,
+    });
+  }
+
   const nameChanged = name.trim() !== (profile?.name ?? '');
+  const isAthlete = profile?.role === 'athlete';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -230,6 +327,67 @@ export default function Profile() {
             farlo ti chiederò conferma.
           </Text>
 
+          {isAthlete && (
+            <>
+              <Text style={styles.sectionTitle}>Sensore Polar</Text>
+              <View style={styles.card}>
+                <Text style={styles.value}>
+                  {polarConnected === null
+                    ? 'Controllo...'
+                    : polarConnected
+                    ? 'Account Polar collegato ✓'
+                    : 'Account Polar non collegato'}
+                </Text>
+                <Text style={[styles.hint, { marginTop: 8 }]}>
+                  Collegando Polar, dopo ogni allenamento registrato con il sensore il grafico delle
+                  zone di frequenza cardiaca compare nel tuo feedback. Lo vedono anche gli
+                  allenatori dei gruppi di cui fai parte. Vengono letti solo gli allenamenti
+                  registrati dopo il collegamento. Puoi scollegare quando vuoi.
+                </Text>
+
+                {polarMsg && <Text style={styles.success}>{polarMsg}</Text>}
+                {polarError && <Text style={styles.error}>{polarError}</Text>}
+
+                {polarConnected === false && (
+                  <Pressable
+                    style={[styles.smallButton, polarBusy && styles.buttonDisabled]}
+                    onPress={connectPolar}
+                    disabled={polarBusy}
+                  >
+                    {polarBusy ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.smallButtonText}>Collega Polar</Text>
+                    )}
+                  </Pressable>
+                )}
+
+                {polarConnected === true && (
+                  <>
+                    <Pressable
+                      style={[styles.smallButton, polarBusy && styles.buttonDisabled]}
+                      onPress={syncPolar}
+                      disabled={polarBusy}
+                    >
+                      {polarBusy ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <Text style={styles.smallButtonText}>Aggiorna dati ora</Text>
+                      )}
+                    </Pressable>
+                    <Pressable
+                      style={styles.outlineDanger}
+                      onPress={askDisconnectPolar}
+                      disabled={polarBusy}
+                    >
+                      <Text style={styles.outlineDangerText}>Scollega Polar</Text>
+                    </Pressable>
+                  </>
+                )}
+              </View>
+            </>
+          )}
+
           <Pressable style={styles.logout} onPress={signOut}>
             <Text style={styles.logoutText}>Esci dall'account</Text>
           </Pressable>
@@ -290,6 +448,15 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   smallButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  outlineDanger: {
+    borderWidth: 1,
+    borderColor: colors.danger,
+    borderRadius: 10,
+    paddingVertical: 11,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  outlineDangerText: { color: colors.danger, fontSize: 16, fontWeight: '600' },
   buttonDisabled: { opacity: 0.6 },
   error: { color: colors.danger, marginTop: 10, fontSize: 14 },
   success: { color: '#2E7D32', marginTop: 10, fontSize: 14 },

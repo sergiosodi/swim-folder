@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
 import { SLOT_LOWER, Slot } from '@/lib/sessions';
 import FatiguePicker from './FatiguePicker';
+import PolarChart from './PolarChart';
 import { KEYBOARD_BAR_ID } from './KeyboardDone';
 
 export type MyEntry = {
@@ -71,7 +72,7 @@ export default function AthletePanel({
     setBusy(true);
     setError(null);
 
-    // Se è assente, commento e fatica non vengono salvati
+    // Se è assente, commento e RPE non vengono salvati
     const entry: MyEntry = present
       ? { present: true, comment: comment.trim() ? comment.trim() : null, fatigue }
       : { present: false, comment: null, fatigue: null };
@@ -175,6 +176,12 @@ export default function AthletePanel({
         )}
       </Pressable>
       {saved && <Text style={styles.saved}>Feedback salvato ✓</Text>}
+
+      {present && (
+        <View style={{ marginTop: 28 }}>
+          <PolarChart userId={userId} date={date} slot={slot} own />
+        </View>
+      )}
     </View>
   );
 }
