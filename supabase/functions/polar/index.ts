@@ -269,7 +269,8 @@ async function handleApp(req: Request) {
       'https://flow.polar.com/oauth2/authorization' +
       `?response_type=code&client_id=${encodeURIComponent(CLIENT_ID)}` +
       `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-      `&state=${encodeURIComponent(state)}`;
+      `&state=${encodeURIComponent(state)}`+
+      `&scope=accesslink.read_all`;
     return json({ url });
   }
 
