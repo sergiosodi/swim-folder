@@ -29,6 +29,10 @@ export default function CoachPanel({ groupId, date, slot, initialText, feedback,
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Stato locale per gestire i click rapidi dell'allenatore sulle presenze
+  const [localFeedback, setLocalFeedback] = useState<AthleteFeedback[]>(feedback);
+  const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
 
   async function save() {
     if (busy) return;
@@ -56,9 +60,51 @@ export default function CoachPanel({ groupId, date, slot, initialText, feedback,
     onSaved(date, clean);
   }
 
-  const present = feedback.filter((f) => f.entry?.present).length;
-  const absent = feedback.filter((f) => f.entry && !f.entry.present).length;
-  const missing = feedback.filter((f) => !f.entry).length;
+  // Funzione per permettere all'allenatore di segnare presente/assente l'atleta
+  async function handleSetPresence(userId: string, present: boolean) {
+    if (updatingUserId) return;
+    setUpdatingUserId(userId);
+    setError(null);
+
+    const { error: err } = await supabase.from('entries').upsert(
+      {
+        group_id: groupId,
+        user_id: userId,
+        date,
+        slot,
+        present,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'group_id,user_id,date,slot' }
+    );
+
+    setUpdatingUserId(null);
+
+    if (err) {
+      setError('Errore aggiornamento presenza: ' + err.message);
+      return;
+    }
+
+    // Aggiorna lo stato locale per riflettere subito la modifica nella UI
+    setLocalFeedback((prev) =>
+      prev.map((f) => {
+        if (f.userId === userId) {
+          return {
+            ...f,
+            entry: {
+              ...(f.entry || { fatigue: null, notes: '' }),
+              present,
+            },
+          };
+        }
+        return f;
+      })
+    );
+  }
+
+  const present = localFeedback.filter((f) => f.entry?.present).length;
+  const absent = localFeedback.filter((f) => f.entry && !f.entry.present).length;
+  const missing = localFeedback.filter((f) => !f.entry).length;
 
   return (
     <View>
@@ -95,7 +141,7 @@ export default function CoachPanel({ groupId, date, slot, initialText, feedback,
 
       <Text style={[styles.sectionLabel, { marginTop: 28 }]}>Feedback degli atleti</Text>
 
-      {feedback.length === 0 ? (
+      {localFeedback.length === 0 ? (
         <Text style={styles.muted}>
           Nessun atleta nel gruppo per ora. Condividi il codice gruppo per farli entrare.
         </Text>
@@ -104,46 +150,83 @@ export default function CoachPanel({ groupId, date, slot, initialText, feedback,
           <Text style={styles.summary}>
             Presenti {present} · Assenti {absent} · Senza feedback {missing}
           </Text>
-          {feedback.map((f) => {
+          {localFeedback.map((f) => {
+            const isUpdating = updatingUserId === f.userId;
+            const isPresent = f.entry?.present === true;
+            const isAbsent = f.entry?.present === false;
             const canOpen = !!f.entry && f.entry.present;
+
             return (
-              <Pressable
-                key={f.userId}
-                disabled={!canOpen}
-                style={styles.card}
-                onPress={() =>
-                  router.push({
-                    pathname: '/feedback',
-                    params: { groupId, userId: f.userId, date, slot },
-                  })
-                }
-              >
+              <View key={f.userId} style={styles.card}>
                 <View style={styles.cardHeader}>
-                  <Text style={styles.name}>{f.name}</Text>
-                  {f.entry ? (
-                    <Text
+                  <Pressable
+                    style={{ flex: 1 }}
+                    disabled={!canOpen}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/feedback',
+                        params: { groupId, userId: f.userId, date, slot },
+                      })
+                    }
+                  >
+                    <Text style={styles.name}>{f.name}</Text>
+                  </Pressable>
+
+                  {/* Pulsanti rapidi per l'allenatore */}
+                  <View style={styles.actionButtons}>
+                    <Pressable
                       style={[
-                        styles.badge,
-                        { color: f.entry.present ? GREEN : colors.danger },
+                        styles.toggleBtn,
+                        styles.presentBtn,
+                        isPresent && styles.presentBtnActive,
                       ]}
+                      onPress={() => handleSetPresence(f.userId, true)}
+                      disabled={isUpdating}
                     >
-                      {f.entry.present ? 'PRESENTE' : 'ASSENTE'}
-                    </Text>
-                  ) : (
-                    <Text style={[styles.badge, { color: colors.muted }]}>NESSUN FEEDBACK</Text>
-                  )}
+                      <Text style={[styles.toggleText, isPresent && styles.toggleTextActive]}>
+                        Pres.
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      style={[
+                        styles.toggleBtn,
+                        styles.absentBtn,
+                        isAbsent && styles.absentBtnActive,
+                      ]}
+                      onPress={() => handleSetPresence(f.userId, false)}
+                      disabled={isUpdating}
+                    >
+                      <Text style={[styles.toggleText, isAbsent && styles.toggleTextActive]}>
+                        Ass.
+                      </Text>
+                    </Pressable>
+                  </View>
+
                   {canOpen && <Text style={styles.chevron}>›</Text>}
                 </View>
 
+                {isUpdating && <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 6 }} />}
+
                 {f.entry?.present && (
-                  <Text style={styles.fatigue}>
-                    RPE:{' '}
-                    <Text style={styles.fatigueValue}>
-                      {f.entry.fatigue != null ? `${f.entry.fatigue}/10` : 'non inserita'}
+                  <Pressable
+                    disabled={!canOpen}
+                    onPress={() =>
+                      router.push({
+                        pathname: '/feedback',
+                        params: { groupId, userId: f.userId, date, slot },
+                      })
+                    }
+                  >
+                    <Text style={styles.fatigue}>
+                      RPE:{' '}
+                      <Text style={styles.fatigueValue}>
+                        {f.entry.fatigue != null ? `${f.entry.fatigue}/10` : 'non inserita'}
+                      </Text>
                     </Text>
-                  </Text>
+                  </Pressable>
                 )}
-              </Pressable>
+              </View>
             );
           })}
         </>
@@ -186,9 +269,27 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   cardHeader: { flexDirection: 'row', alignItems: 'center' },
-  name: { flex: 1, fontSize: 17, fontWeight: '600', color: colors.text, paddingRight: 8 },
-  badge: { fontSize: 13, fontWeight: '700' },
+  name: { fontSize: 17, fontWeight: '600', color: colors.text },
   chevron: { fontSize: 26, color: colors.muted, marginLeft: 10, lineHeight: 28 },
   fatigue: { fontSize: 14, color: colors.muted, marginTop: 8 },
   fatigueValue: { color: colors.text, fontWeight: '700' },
+  actionButtons: { flexDirection: 'row', gap: 6, marginLeft: 'auto' },
+  toggleBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  presentBtnActive: {
+    backgroundColor: GREEN,
+    borderColor: GREEN,
+  },
+  absentBtnActive: {
+    backgroundColor: colors.danger,
+    borderColor: colors.danger,
+  },
+  toggleText: { fontSize: 12, fontWeight: '600', color: colors.muted },
+  toggleTextActive: { color: '#fff' },
 });
