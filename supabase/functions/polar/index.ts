@@ -1,7 +1,7 @@
 // Funzione Supabase "polar"
-// - collega l'account Polar di un atleta (OAuth2)
+// - collega l'account Polar di un atleta o dell'allenatore (OAuth2)
 // - riceve da Polar la notifica "nuovo allenamento" (webhook)
-// - salva il tempo passato in ogni zona di frequenza cardiaca
+// - gestisce il salvataggio diretto o l'associazione automatica per nome atleta
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -240,13 +240,63 @@ async function handleWebhook(req: Request) {
   if (event !== 'EXERCISE') return new Response('ok', { status: 200 });
 
   const payload = JSON.parse(raw);
-  const { data: t } = await admin
+  const polarUserId = String(payload.user_id);
+  const exerciseId = String(payload.entity_id || payload.exercise_id);
+
+  // 1. Cerca se questo polar_user_id appartiene direttamente a un ATLETA registrato
+  const { data: athleteToken } = await admin
     .from('polar_tokens')
     .select('user_id, access_token')
-    .eq('polar_user_id', String(payload.user_id))
+    .eq('polar_user_id', polarUserId)
     .maybeSingle();
 
-  if (t) await syncUser(t.user_id as string, t.access_token as string);
+  if (athleteToken) {
+    // CASO A: L'allenamento è dell'atleta (collegamento autonomo)
+    await syncUser(athleteToken.user_id as string, athleteToken.access_token as string);
+    return new Response('ok', { status: 200 });
+  }
+
+  // 2. Altrimenti, verifichiamo se il token appartiene all'ALLENATORE (o a un altro account centrale)
+  const { data: coachTokenRecord } = await admin
+    .from('polar_tokens')
+    .select('user_id, access_token')
+    .eq('polar_user_id', polarUserId)
+    .maybeSingle();
+
+  if (coachTokenRecord) {
+    // CASO B: L'allenamento è registrato tramite l'account dell'allenatore.
+    // Scarichiamo il dettaglio di questo singolo allenamento usando il token dell'allenatore:
+    const exRes = await fetch(`${API}/exercises/${exerciseId}?zones=true`, {
+      headers: { Authorization: `Bearer ${coachTokenRecord.access_token}`, Accept: 'application/json' },
+    });
+
+    if (exRes.ok) {
+      const exData = await exRes.json();
+      
+      // Estraiamo il nome dell'atleta dall'allenamento di Polar
+      const polarAthleteName = exData.participant?.name || exData.name;
+
+      if (polarAthleteName) {
+        // Cerchiamo nel database l'atleta che ha lo stesso nome esatto
+        const { data: matchedAthlete } = await admin
+          .from('profiles') // Assicurati che corrisponda alla tua tabella utenti/atleti
+          .select('id')
+          .ilike('name', polarAthleteName)
+          .maybeSingle();
+
+        if (matchedAthlete) {
+          // Salviamo l'allenamento direttamente nel profilo dell'atleta corretto!
+          const row = toRow(matchedAthlete.id as string, exData);
+          if (row) {
+            await admin
+              .from('polar_exercises')
+              .upsert(row, { onConflict: 'user_id,polar_exercise_id' });
+          }
+        }
+      }
+    }
+  }
+
   return new Response('ok', { status: 200 });
 }
 
@@ -269,7 +319,7 @@ async function handleApp(req: Request) {
       'https://flow.polar.com/oauth2/authorization' +
       `?response_type=code&client_id=${encodeURIComponent(CLIENT_ID)}` +
       `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-      `&state=${encodeURIComponent(state)}`+
+      `&state=${encodeURIComponent(state)}` +
       `&scope=accesslink.read_all`;
     return json({ url });
   }
