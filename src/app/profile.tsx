@@ -244,7 +244,7 @@ export default function Profile() {
   }
 
   const nameChanged = name.trim() !== (profile?.name ?? '');
-  const isAthlete = profile?.role === 'athlete';
+  const canUsePolar = profile?.role === 'athlete' || profile?.role === 'coach';
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -327,7 +327,7 @@ export default function Profile() {
             farlo ti chiederò conferma.
           </Text>
 
-          {isAthlete && (
+          {canUsePolar && (
             <>
               <Text style={styles.sectionTitle}>Sensore Polar</Text>
               <View style={styles.card}>

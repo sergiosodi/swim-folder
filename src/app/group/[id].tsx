@@ -6,7 +6,6 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  Share,
   StyleSheet,
   Text,
   View,
@@ -48,7 +47,6 @@ import KeyboardDone from '@/components/KeyboardDone';
 type Group = {
   id: string;
   name: string;
-  code: string;
   owner_id: string;
   morning_days: number[];
   afternoon_days: number[];
@@ -88,7 +86,6 @@ export default function GroupScreen() {
 
   const [busySession, setBusySession] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const isOwner = !!group && group.owner_id === uid;
   const isAthlete = profile?.role === 'athlete';
@@ -124,7 +121,7 @@ export default function GroupScreen() {
       (async () => {
         const { data, error: err } = await supabase
           .from('groups')
-          .select('id, name, code, owner_id, morning_days, afternoon_days')
+          .select('id, name, owner_id, morning_days, afternoon_days')
           .eq('id', id)
           .maybeSingle();
         if (!active) return;
@@ -285,23 +282,6 @@ export default function GroupScreen() {
       destructive: true,
       onConfirm: () => setSessionState(date, slot, false),
     });
-  }
-
-  async function shareCode() {
-    if (!group) return;
-    const message = `Entra nel mio gruppo "${group.name}" su Swim Folder con il codice: ${group.code}`;
-    try {
-      const nav: any = (globalThis as any).navigator;
-      if (Platform.OS === 'web' && !(nav && nav.share)) {
-        await nav?.clipboard?.writeText(message);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2500);
-        return;
-      }
-      await Share.share({ message });
-    } catch {
-      // condivisione annullata: niente da fare
-    }
   }
 
   function goBack() {
@@ -503,20 +483,6 @@ export default function GroupScreen() {
           >
             <Text style={styles.title}>{group.name}</Text>
 
-            {isOwner && (
-              <View style={styles.codeCard}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.codeLabel}>Codice gruppo</Text>
-                  <Text selectable style={styles.code}>
-                    {group.code}
-                  </Text>
-                </View>
-                <Pressable style={styles.shareButton} onPress={shareCode}>
-                  <Text style={styles.shareText}>{copied ? 'Copiato ✓' : 'Condividi'}</Text>
-                </Pressable>
-              </View>
-            )}
-
             <View style={styles.weekHeader}>
               <Pressable onPress={() => goWeek(-1)} style={styles.arrow} hitSlop={8}>
                 <Text style={styles.arrowText}>‹</Text>
@@ -612,27 +578,6 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: '700', color: colors.text, marginBottom: 16 },
   muted: { color: colors.muted, fontSize: 15, lineHeight: 22 },
   error: { color: colors.danger, fontSize: 14, marginBottom: 10 },
-
-  codeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 20,
-  },
-  codeLabel: { fontSize: 13, color: colors.muted },
-  code: { fontSize: 26, fontWeight: '700', letterSpacing: 5, color: colors.primary, marginTop: 2 },
-  shareButton: {
-    borderWidth: 1,
-    borderColor: colors.primary,
-    borderRadius: 10,
-    paddingVertical: 9,
-    paddingHorizontal: 16,
-  },
-  shareText: { color: colors.primary, fontSize: 15, fontWeight: '600' },
 
   weekHeader: {
     flexDirection: 'row',

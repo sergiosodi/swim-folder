@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
@@ -11,6 +20,7 @@ import { DEFAULT_AFTERNOON_DAYS } from '@/lib/sessions';
 type Group = {
   id: string;
   name: string;
+  code: string;
   owner_id: string;
   morning_days: number[];
   afternoon_days: number[];
@@ -57,6 +67,7 @@ export default function GroupSettings() {
   const [afternoon, setAfternoon] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -64,7 +75,7 @@ export default function GroupSettings() {
     (async () => {
       const { data, error: err } = await supabase
         .from('groups')
-        .select('id, name, owner_id, morning_days, afternoon_days')
+        .select('id, name, code, owner_id, morning_days, afternoon_days')
         .eq('id', groupId)
         .maybeSingle();
       if (!active) return;
@@ -113,6 +124,23 @@ export default function GroupSettings() {
     setSaved(true);
   }
 
+  async function shareCode() {
+    if (!group) return;
+    const message = `Entra nel mio gruppo "${group.name}" su Swim Folder con il codice: ${group.code}`;
+    try {
+      const nav: any = (globalThis as any).navigator;
+      if (Platform.OS === 'web' && !(nav && nav.share)) {
+        await nav?.clipboard?.writeText(message);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2500);
+        return;
+      }
+      await Share.share({ message });
+    } catch {
+      // condivisione annullata: niente da fare
+    }
+  }
+
   function goBack() {
     if (router.canGoBack()) router.back();
     else router.replace('/');
@@ -138,18 +166,32 @@ export default function GroupSettings() {
           <Text style={styles.subtitle}>{group.name}</Text>
 
           {isOwner ? (
-            <Pressable
-              style={styles.row}
-              onPress={() =>
-                router.push({
-                  pathname: '/athletes',
-                  params: { groupId: group.id, groupName: group.name },
-                })
-              }
-            >
-              <Text style={styles.rowText}>Atleti del gruppo</Text>
-              <Text style={styles.chevron}>›</Text>
-            </Pressable>
+            <>
+              <View style={styles.codeCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.codeLabel}>Codice gruppo</Text>
+                  <Text selectable style={styles.code}>
+                    {group.code}
+                  </Text>
+                </View>
+                <Pressable style={styles.shareButton} onPress={shareCode}>
+                  <Text style={styles.shareText}>{copied ? 'Copiato ✓' : 'Condividi'}</Text>
+                </Pressable>
+              </View>
+
+              <Pressable
+                style={styles.row}
+                onPress={() =>
+                  router.push({
+                    pathname: '/athletes',
+                    params: { groupId: group.id, groupName: group.name },
+                  })
+                }
+              >
+                <Text style={styles.rowText}>Atleti del gruppo</Text>
+                <Text style={styles.chevron}>›</Text>
+              </Pressable>
+            </>
           ) : (
             <View style={styles.readonlyBanner}>
               <Text style={styles.readonlyText}>
@@ -219,6 +261,28 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: '700', color: colors.text },
   subtitle: { fontSize: 16, color: colors.muted, marginTop: 4, marginBottom: 22 },
   muted: { fontSize: 15, color: colors.muted, lineHeight: 22 },
+
+  codeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 10,
+  },
+  codeLabel: { fontSize: 13, color: colors.muted },
+  code: { fontSize: 26, fontWeight: '700', letterSpacing: 5, color: colors.primary, marginTop: 2 },
+  shareButton: {
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 10,
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+  },
+  shareText: { color: colors.primary, fontSize: 15, fontWeight: '600' },
+
   row: {
     flexDirection: 'row',
     alignItems: 'center',
