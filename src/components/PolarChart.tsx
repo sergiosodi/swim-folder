@@ -143,9 +143,9 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
               {ex.max_hr != null ? `  ·  FC max ${ex.max_hr}` : ''}
             </Text>
 
-            {/* Grafico a linee continuo sopra le zone */}
-            {samples.length > 1 && (
-              <View style={styles.chartContainer}>
+            {/* Box del Grafico a linee continuo (visibile con o senza campioni) */}
+            <View style={styles.chartContainer}>
+              {samples.length > 1 ? (
                 <Svg height={svgHeight} width="100%" viewBox={`0 0 ${svgWidth} ${svgHeight}`}>
                   {/* Sfondo zone colorate sfumate nel grafico */}
                   <Rect x="0" y="0" width={svgWidth} height={svgHeight * 0.2} fill="#E0185A" opacity="0.2" />
@@ -157,8 +157,12 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
                   {/* Linea continua dei battiti cardiaci */}
                   <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth="2.5" />
                 </Svg>
-              </View>
-            )}
+              ) : (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                  <Text style={{ color: '#888', fontSize: 12 }}>Nessun campione HR disponibile ({samples.length})</Text>
+                </View>
+              )}
+            </View>
 
             {!hasHr ? (
               <Text style={styles.muted}>Nessun dato di frequenza cardiaca registrato.</Text>
