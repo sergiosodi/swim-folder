@@ -139,13 +139,14 @@ async function disconnectLocal(userId: string, deleteData: boolean) {
   await admin.from('polar_connections').delete().eq('user_id', userId);
 }
 
-// Scarica gli allenamenti, le zone e i campioni cardiaci
+// Scarica gli allenamenti degli ultimi 30 giorni (con le zone e i campioni) e li salva
 async function syncUser(userId: string, token: string) {
   const res = await fetch(`${API}/exercises?zones=true`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
 
   if (res.status === 401) {
+    // l'atleta ha revocato l'accesso dal suo account Polar
     await disconnectLocal(userId, false);
     return { ok: false, status: 401, error: 'Accesso Polar revocato' };
   }
@@ -158,20 +159,24 @@ async function syncUser(userId: string, token: string) {
 
   for (const ex of exercises) {
     if (!ex?.id) continue;
-    // Scarica i campioni HR per ogni singolo allenamento (per il grafico a linee)
-    let samples = null;
+
+    // --- AGGIUNGI QUI IL BLOCCO PER I CAMPIONI ---
+    let hrSamples = [];
     try {
       const sampRes = await fetch(`${API}/exercises/${ex.id}/samples`, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
       });
       if (sampRes.ok) {
-        samples = await sampRes.json();
+        const sampData = await sampRes.json();
+        // Cerca i campioni in tutte le possibili proprietà restituite da Polar
+        hrSamples = sampData.samples || sampData.heart_rate_samples || sampData.heart_rate || [];
       }
     } catch (_) {
-      // Ignora se i campioni non sono disponibili per qualche sessione breve
+      // Ignora se non ci sono campioni
     }
+    // ---------------------------------------------
 
-    const row = toRow(userId, ex, samples);
+    const row = toRow(userId, ex, { heart_rate: hrSamples });
     if (row) rows.push(row);
   }
 
