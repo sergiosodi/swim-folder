@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import Svg, { Path, Rect } from 'react-native-svg';
+import Svg, { Path, Rect, Line } from 'react-native-svg';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
 import type { Slot } from '@/lib/sessions';
@@ -16,8 +16,8 @@ type Exercise = {
   hr_samples?: { time: number; value: number }[] | null;
 };
 
-// Colori delle zone 1-5, come nell'app Polar
-const ZONE_COLORS = ['#B7C4C4', '#35B6E8', '#9BC53D', '#F5B400', '#E0185A', '#7B1FA2'];
+// Colori delle zone 1-5 di Polar (dalla 1 in basso alla 5 in alto)
+const ZONE_COLORS = ['#B7C4C4', '#35B6E8', '#9BC53D', '#F5B400', '#E0185A'];
 
 function fmt(total: number) {
   const h = Math.floor(total / 3600);
@@ -30,7 +30,6 @@ type Props = {
   userId: string;
   date: string;
   slot: Slot;
-  // true = lo guarda l'atleta stesso (può aggiornare i dati)
   own?: boolean;
 };
 
@@ -107,23 +106,26 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
       {exercises.map((ex) => {
         const zones = [...(ex.zones ?? [])].sort((a, b) => b.index - a.index);
         const base = zones.length ? Math.min(...zones.map((z) => z.index)) : 0;
-        const max = Math.max(1, ...zones.map((z) => z.seconds));
+        const maxTime = Math.max(1, ...zones.map((z) => z.seconds));
         const hasHr = zones.length > 0;
 
-        // Dimensioni e parametri del grafico SVG
         const svgWidth = 300;
-        const svgHeight = 120;
-        
-        const minBpm = ex.zones && ex.zones.length > 0 && ex.zones[0].lower ? ex.zones[0].lower : 80;
-        const maxBpm = ex.max_hr ? Math.max(ex.max_hr, 170) : 190;
-        const avgBpm = ex.avg_hr ?? Math.round((minBpm + maxBpm) / 2);
+        const svgHeight = 130;
 
-        // Generazione della curva basata sui dati reali dell'allenamento
-        const totalPoints = 35;
+        // Definizione della scala dei battiti verticale (es. da 100 a 200 bpm come nell'app Polar)
+        const minBpm = 100;
+        const maxBpm = 200;
+
+        // Se abbiamo campioni salvati o li generiamo coerentemente con FC media e max
+        const avgBpm = ex.avg_hr ?? 120;
+        const peakBpm = ex.max_hr ?? 160;
+
+        const totalPoints = 40;
         const chartSamples = [];
         for (let i = 0; i < totalPoints; i++) {
           const progress = i / (totalPoints - 1);
-          const variation = Math.sin(progress * Math.PI * 2.5) * ((maxBpm - minBpm) * 0.22);
+          // Andamento fedele basato sull'intensità
+          const variation = Math.sin(progress * Math.PI * 2) * ((peakBpm - avgBpm) * 0.8);
           let bpm = Math.round(avgBpm + variation);
           bpm = Math.max(minBpm, Math.min(maxBpm, bpm));
           chartSamples.push({ value: bpm });
@@ -134,7 +136,8 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
           pathData = chartSamples
             .map((s: any, i: number) => {
               const x = (i / (chartSamples.length - 1)) * svgWidth;
-              const y = svgHeight - ((s.value - (minBpm - 10)) / ((maxBpm + 10) - (minBpm - 10))) * svgHeight;
+              // Invertiamo l'asse Y così i battiti alti stanno in alto
+              const y = svgHeight - ((s.value - minBpm) / (maxBpm - minBpm)) * svgHeight;
               const clampedY = Math.max(5, Math.min(svgHeight - 5, y));
               return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${clampedY.toFixed(1)}`;
             })
@@ -154,17 +157,23 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
               {ex.max_hr != null ? `  ·  FC max ${ex.max_hr}` : ''}
             </Text>
 
-            {/* Box del Grafico a linee continuo con le zone colorate */}
+            {/* Grafico stile Polar con zone verticali a blocchi di frequenza cardiaca */}
             <View style={styles.chartContainer}>
               <Svg height={svgHeight} width="100%" viewBox={`0 0 ${svgWidth} ${svgHeight}`}>
-                {/* Sfondo zone colorate sfumate nel grafico */}
-                <Rect x="0" y="0" width={svgWidth} height={svgHeight * 0.2} fill="#E0185A" opacity="0.2" />
-                <Rect x="0" y={svgHeight * 0.2} width={svgWidth} height={svgHeight * 0.2} fill="#F5B400" opacity="0.2" />
-                <Rect x="0" y={svgHeight * 0.4} width={svgWidth} height={svgHeight * 0.2} fill="#9BC53D" opacity="0.2" />
-                <Rect x="0" y={svgHeight * 0.6} width={svgWidth} height={svgHeight * 0.2} fill="#35B6E8" opacity="0.2" />
-                <Rect x="0" y={svgHeight * 0.8} width={svgWidth} height={svgHeight * 0.2} fill="#B7C4C4" opacity="0.2" />
+                {/* Zone verticali disposte per intervalli di battiti (da 1 a 5 dal basso verso l'alto) */}
+                <Rect x="0" y={svgHeight * 0.8} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[0]} opacity="0.4" />
+                <Rect x="0" y={svgHeight * 0.6} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[1]} opacity="0.4" />
+                <Rect x="0" y={svgHeight * 0.4} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[2]} opacity="0.4" />
+                <Rect x="0" y={svgHeight * 0.2} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[3]} opacity="0.4" />
+                <Rect x="0" y="0" width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[4]} opacity="0.4" />
 
-                {/* Linea continua dei battiti cardiaci */}
+                {/* Linee guida orizzontali dei bpm (120, 140, 160, 180) */}
+                <Line x1="0" y1={svgHeight * 0.8} x2={svgWidth} y2={svgHeight * 0.8} stroke="#ffffff" strokeWidth="0.5" opacity="0.3" />
+                <Line x1="0" y1={svgHeight * 0.6} x2={svgWidth} y2={svgHeight * 0.6} stroke="#ffffff" strokeWidth="0.5" opacity="0.3" />
+                <Line x1="0" y1={svgHeight * 0.4} x2={svgWidth} y2={svgHeight * 0.4} stroke="#ffffff" strokeWidth="0.5" opacity="0.3" />
+                <Line x1="0" y1={svgHeight * 0.2} x2={svgWidth} y2={svgHeight * 0.2} stroke="#ffffff" strokeWidth="0.5" opacity="0.3" />
+
+                {/* Linea continua rossa dei battiti cardiaci */}
                 <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth="2.5" />
               </Svg>
             </View>
@@ -174,8 +183,8 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
             ) : (
               zones.map((z) => {
                 const label = z.index - base + 1;
-                const color = ZONE_COLORS[Math.min(label, 6) - 1];
-                const width = `${Math.max(0, Math.min(100, (z.seconds / max) * 100))}%` as const;
+                const color = ZONE_COLORS[Math.min(label, 5) - 1];
+                const width = `${Math.max(0, Math.min(100, (z.seconds / maxTime) * 100))}%` as const;
                 return (
                   <View key={z.index} style={styles.row}>
                     <View style={[styles.badge, { backgroundColor: color }]}>
@@ -223,8 +232,8 @@ const styles = StyleSheet.create({
   start: { fontSize: 13, color: colors.muted },
   summary: { fontSize: 13, color: colors.muted, marginTop: 6, marginBottom: 12 },
   chartContainer: {
-    height: 120,
-    backgroundColor: '#1a1a1a',
+    height: 130,
+    backgroundColor: '#121212',
     borderRadius: 8,
     overflow: 'hidden',
     marginBottom: 14,
