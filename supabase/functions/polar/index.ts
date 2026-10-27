@@ -1,7 +1,7 @@
 // Funzione Supabase "polar"
 // - collega l'account Polar di un atleta o dell'allenatore (OAuth2)
 // - riceve da Polar la notifica "nuovo allenamento" (webhook)
-// - gestisce il salvataggio diretto o l'associazione automatica per nome atleta
+// - scarica zone e campioni di frequenza cardiaca per i grafici
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -80,8 +80,14 @@ async function readState(state: string): Promise<string | null> {
 }
 
 // "PT1H5M12S" -> secondi
-function isoToSeconds(iso?: string): number {
-  if (!iso) return 0;
+function isoToSeconds(val: any): number {
+  if (!val) return 0;
+  if (typeof val === 'number') {
+    return val > 10000 ? Math.round(val / 1000) : Math.round(val);
+  }
+  const iso = String(val);
+  if (!iso.startsWith('P')) return Number(iso) || 0;
+  
   const m = iso.match(
     /^P(?:(\d+)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/
   );
@@ -94,9 +100,9 @@ function isoToSeconds(iso?: string): number {
 
 // ---------- dati di Polar ----------
 
-function toRow(userId: string, ex: any) {
+function toRow(userId: string, ex: any, samples: any = null) {
   if (!ex?.id || !ex?.start_time) return null;
-  const start = String(ex.start_time); // ora locale, es. 2026-10-05T17:30:00
+  const start = String(ex.start_time);
   const hour = Number(start.slice(11, 13));
 
   const zones = Array.isArray(ex.heart_rate_zones)
@@ -110,6 +116,9 @@ function toRow(userId: string, ex: any) {
         .sort((a: any, b: any) => a.index - b.index)
     : [];
 
+  // Estrae i campioni di frequenza cardiaca per il grafico a linee
+  const hrSamples = samples?.heart_rate ?? samples?.samples ?? [];
+
   return {
     user_id: userId,
     polar_exercise_id: String(ex.id),
@@ -120,6 +129,7 @@ function toRow(userId: string, ex: any) {
     avg_hr: ex.heart_rate?.average ?? null,
     max_hr: ex.heart_rate?.maximum ?? null,
     zones,
+    hr_samples: hrSamples, // Salviamo i campioni per il grafico continuo
   };
 }
 
@@ -129,14 +139,13 @@ async function disconnectLocal(userId: string, deleteData: boolean) {
   await admin.from('polar_connections').delete().eq('user_id', userId);
 }
 
-// Scarica gli allenamenti degli ultimi 30 giorni (con le zone) e li salva
+// Scarica gli allenamenti, le zone e i campioni cardiaci
 async function syncUser(userId: string, token: string) {
   const res = await fetch(`${API}/exercises?zones=true`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
 
   if (res.status === 401) {
-    // l'atleta ha revocato l'accesso dal suo account Polar
     await disconnectLocal(userId, false);
     return { ok: false, status: 401, error: 'Accesso Polar revocato' };
   }
@@ -144,9 +153,27 @@ async function syncUser(userId: string, token: string) {
   if (!res.ok) return { ok: false, status: res.status, error: 'Polar ha risposto con un errore' };
 
   const list = await res.json();
-  const rows = (Array.isArray(list) ? list : [])
-    .map((ex: unknown) => toRow(userId, ex))
-    .filter(Boolean);
+  const exercises = Array.isArray(list) ? list : [];
+  const rows = [];
+
+  for (const ex of exercises) {
+    if (!ex?.id) continue;
+    // Scarica i campioni HR per ogni singolo allenamento (per il grafico a linee)
+    let samples = null;
+    try {
+      const sampRes = await fetch(`${API}/exercises/${ex.id}/samples`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      });
+      if (sampRes.ok) {
+        samples = await sampRes.json();
+      }
+    } catch (_) {
+      // Ignora se i campioni non sono disponibili per qualche sessione breve
+    }
+
+    const row = toRow(userId, ex, samples);
+    if (row) rows.push(row);
+  }
 
   if (rows.length > 0) {
     const { error } = await admin
@@ -190,7 +217,6 @@ async function handleCallback(url: URL) {
     const accessToken = String(tok.access_token);
     const polarUserId = String(tok.x_user_id);
 
-    // Registra l'utente presso la nostra applicazione Polar (409 = già registrato: va bene)
     const reg = await fetch(`${API}/users`, {
       method: 'POST',
       headers: {
@@ -228,7 +254,6 @@ async function handleWebhook(req: Request) {
   const event = req.headers.get('polar-webhook-event');
   const raw = await req.text();
 
-  // Polar manda un PING quando si crea il webhook: basta rispondere 200
   if (event === 'PING') return new Response('ok', { status: 200 });
 
   if (!WEBHOOK_SECRET) return new Response('webhook non configurato', { status: 500 });
@@ -243,7 +268,7 @@ async function handleWebhook(req: Request) {
   const polarUserId = String(payload.user_id);
   const exerciseId = String(payload.entity_id || payload.exercise_id);
 
-  // 1. Cerca se questo polar_user_id appartiene direttamente a un ATLETA registrato
+  // 1. Cerca se questo polar_user_id appartiene direttamente a un ATLETA
   const { data: athleteToken } = await admin
     .from('polar_tokens')
     .select('user_id, access_token')
@@ -251,12 +276,11 @@ async function handleWebhook(req: Request) {
     .maybeSingle();
 
   if (athleteToken) {
-    // CASO A: L'allenamento è dell'atleta (collegamento autonomo)
     await syncUser(athleteToken.user_id as string, athleteToken.access_token as string);
     return new Response('ok', { status: 200 });
   }
 
-  // 2. Altrimenti, verifichiamo se il token appartiene all'ALLENATORE (o a un altro account centrale)
+  // 2. Altrimenti, verifica se appartiene all'allenatore
   const { data: coachTokenRecord } = await admin
     .from('polar_tokens')
     .select('user_id, access_token')
@@ -264,29 +288,32 @@ async function handleWebhook(req: Request) {
     .maybeSingle();
 
   if (coachTokenRecord) {
-    // CASO B: L'allenamento è registrato tramite l'account dell'allenatore.
-    // Scarichiamo il dettaglio di questo singolo allenamento usando il token dell'allenatore:
+    const coachToken = coachTokenRecord.access_token;
     const exRes = await fetch(`${API}/exercises/${exerciseId}?zones=true`, {
-      headers: { Authorization: `Bearer ${coachTokenRecord.access_token}`, Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${coachToken}`, Accept: 'application/json' },
     });
 
     if (exRes.ok) {
       const exData = await exRes.json();
-      
-      // Estraiamo il nome dell'atleta dall'allenamento di Polar
       const polarAthleteName = exData.participant?.name || exData.name;
 
       if (polarAthleteName) {
-        // Cerchiamo nel database l'atleta che ha lo stesso nome esatto
         const { data: matchedAthlete } = await admin
-          .from('profiles') // Assicurati che corrisponda alla tua tabella utenti/atleti
+          .from('profiles')
           .select('id')
           .ilike('name', polarAthleteName)
           .maybeSingle();
 
         if (matchedAthlete) {
-          // Salviamo l'allenamento direttamente nel profilo dell'atleta corretto!
-          const row = toRow(matchedAthlete.id as string, exData);
+          let samples = null;
+          try {
+            const sampRes = await fetch(`${API}/exercises/${exerciseId}/samples`, {
+              headers: { Authorization: `Bearer ${coachToken}`, Accept: 'application/json' },
+            });
+            if (sampRes.ok) samples = await sampRes.json();
+          } catch (_) {}
+
+          const row = toRow(matchedAthlete.id as string, exData, samples);
           if (row) {
             await admin
               .from('polar_exercises')
@@ -338,7 +365,6 @@ async function handleApp(req: Request) {
 
   if (body.action === 'disconnect') {
     if (t) {
-      // chiede a Polar di scollegare l'utente; se fallisce si procede comunque
       await fetch(`${API}/users/${t.polar_user_id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${t.access_token}` },
