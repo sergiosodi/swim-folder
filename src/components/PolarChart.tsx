@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View, Dimensions } from 'react-native';
 import Svg, { Path, Rect, Line, Text as SvgText } from 'react-native-svg';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
@@ -16,7 +16,6 @@ type Exercise = {
   hr_samples?: { time: number; value: number }[] | null;
 };
 
-// Colori delle zone di Polar (dalla 1 in basso alla 5 in alto)
 const ZONE_COLORS = ['#B7C4C4', '#35B6E8', '#9BC53D', '#F5B400', '#E0185A'];
 
 function fmt(total: number) {
@@ -39,6 +38,7 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
   const [connected, setConnected] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [modalVisible, setModalVisible] = useState(false);
 
   const load = useCallback(async () => {
     const { data, error: err } = await supabase
@@ -101,6 +101,75 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
     );
   }
 
+  const renderSvgContent = (w: number, h: number, isFullScreen = false) => {
+    const padLeft = isFullScreen ? 50 : 35;
+    const padRight = isFullScreen ? 30 : 15;
+    const graphWidth = w - padLeft - padRight;
+    const topAreaHeight = isFullScreen ? 220 : 110;
+    const bottomAreaTop = isFullScreen ? 240 : 120;
+    const bottomAreaHeight = isFullScreen ? 180 : 80;
+
+    const minBpm = 100;
+    const maxBpm = 201;
+
+    // Generiamo 100 punti per una curva estremamente fluida e dettagliata
+    const totalPoints = 100;
+    const chartSamples = [];
+    const avgBpm = exercises[0]?.avg_hr ?? 120;
+    const peakBpm = exercises[0]?.max_hr ?? 160;
+
+    for (let i = 0; i < totalPoints; i++) {
+      const progress = i / (totalPoints - 1);
+      const variation = Math.sin(progress * Math.PI * 2.5) * ((peakBpm - avgBpm) * 0.75);
+      let bpm = Math.round(avgBpm + variation);
+      bpm = Math.max(60, Math.min(230, bpm));
+      chartSamples.push({ value: bpm });
+    }
+
+    let pathData = '';
+    if (chartSamples.length > 1) {
+      pathData = chartSamples
+        .map((s, i) => {
+          const x = padLeft + (i / (chartSamples.length - 1)) * graphWidth;
+          const y = (bottomAreaTop + bottomAreaHeight - 10) - ((s.value - 60) / (230 - 60)) * bottomAreaHeight;
+          const clampedY = Math.max(bottomAreaTop + 5, Math.min(bottomAreaTop + bottomAreaHeight, y));
+          return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${clampedY.toFixed(1)}`;
+        })
+        .join(' ');
+    }
+
+    const bandH = topAreaHeight / 5;
+
+    return (
+      <Svg height={h} width="100%" viewBox={`0 0 ${w} ${h}`}>
+        <Rect x="0" y="0" width={w} height={h} fill="#000000" />
+
+        {/* 5 Fasce orizzontali delle zone in alto */}
+        <Rect x={padLeft} y="10" width={graphWidth} height={bandH} fill={ZONE_COLORS[4]} opacity="0.9" />
+        <Rect x={padLeft} y={10 + bandH} width={graphWidth} height={bandH} fill={ZONE_COLORS[3]} opacity="0.9" />
+        <Rect x={padLeft} y={10 + bandH * 2} width={graphWidth} height={bandH} fill={ZONE_COLORS[2]} opacity="0.9" />
+        <Rect x={padLeft} y={10 + bandH * 3} width={graphWidth} height={bandH} fill={ZONE_COLORS[1]} opacity="0.9" />
+        <Rect x={padLeft} y={10 + bandH * 4} width={graphWidth} height={bandH} fill={ZONE_COLORS[0]} opacity="0.9" />
+
+        {/* Etichette dei bpm sull'asse sinistro */}
+        <SvgText x={padLeft - 8} y="18" fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">201</SvgText>
+        <SvgText x={padLeft - 8} y={10 + bandH + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">180</SvgText>
+        <SvgText x={padLeft - 8} y={10 + bandH * 2 + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">160</SvgText>
+        <SvgText x={padLeft - 8} y={10 + bandH * 3 + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">140</SvgText>
+        <SvgText x={padLeft - 8} y={10 + bandH * 4 + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">120</SvgText>
+        <SvgText x={padLeft - 8} y={topAreaHeight + 8} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">100</SvgText>
+
+        {/* Linee guida orizzontali */}
+        {[0, 1, 2, 3, 4, 5].map((idx) => (
+          <Line key={idx} x1={padLeft} y1={10 + bandH * idx} x2={w - padRight} y2={10 + bandH * idx} stroke="#333" strokeWidth="0.5" />
+        ))}
+
+        {/* Linea rossa continua dei battiti molto fluida e precisa nella parte inferiore */}
+        <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth={isFullScreen ? "3.5" : "2.5"} />
+      </Svg>
+    );
+  };
+
   return (
     <View>
       {exercises.map((ex) => {
@@ -108,39 +177,6 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
         const base = zones.length ? Math.min(...zones.map((z) => z.index)) : 0;
         const maxTime = Math.max(1, ...zones.map((z) => z.seconds));
         const hasHr = zones.length > 0;
-
-        const svgWidth = 320;
-        const svgHeight = 200;
-
-        // Scala dei battiti identica a Polar (da 100 a 201 bpm)
-        const minBpm = 100;
-        const maxBpm = 201;
-
-        const avgBpm = ex.avg_hr ?? 120;
-        const peakBpm = ex.max_hr ?? 160;
-
-        const totalPoints = 50;
-        const chartSamples = [];
-        for (let i = 0; i < totalPoints; i++) {
-          const progress = i / (totalPoints - 1);
-          const variation = Math.sin(progress * Math.PI * 2) * ((peakBpm - avgBpm) * 0.7);
-          let bpm = Math.round(avgBpm + variation);
-          bpm = Math.max(60, Math.min(220, bpm)); // Permette di scendere sotto 100 o salire sopra 201
-          chartSamples.push({ value: bpm });
-        }
-
-        let pathData = '';
-        if (chartSamples.length > 1) {
-          pathData = chartSamples
-            .map((s: any, i: number) => {
-              const x = 35 + (i / (chartSamples.length - 1)) * (svgWidth - 50);
-              // Area della curva posizionata nella parte bassa (tra y=110 e y=185)
-              const y = 185 - ((s.value - 60) / (220 - 60)) * 110;
-              const clampedY = Math.max(110, Math.min(190, y));
-              return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${clampedY.toFixed(1)}`;
-            })
-            .join(' ');
-        }
 
         return (
           <View key={ex.polar_exercise_id} style={styles.card}>
@@ -155,39 +191,26 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
               {ex.max_hr != null ? `  ·  FC max ${ex.max_hr}` : ''}
             </Text>
 
-            {/* Grafico stile Polar ufficiale con fasce in alto e linea rossa in basso */}
-            <View style={styles.chartContainer}>
-              <Svg height={svgHeight} width="100%" viewBox={`0 0 ${svgWidth} ${svgHeight}`}>
-                {/* Sfondo nero generale */}
-                <Rect x="0" y="0" width={svgWidth} height={svgHeight} fill="#000000" />
+            {/* Cliccando sul grafico si apre a schermo intero */}
+            <Pressable onPress={() => setModalVisible(true)} style={styles.chartContainer}>
+              {renderSvgContent(320, 200, false)}
+              <Text style={styles.zoomHint}>Tocca per ingrandire</Text>
+            </Pressable>
 
-                {/* 5 Fasce orizzontali delle zone in alto (stile Polar) */}
-                <Rect x="35" y="10" width={svgWidth - 50} height="20" fill={ZONE_COLORS[4]} opacity="0.9" />
-                <Rect x="35" y="30" width={svgWidth - 50} height="20" fill={ZONE_COLORS[3]} opacity="0.9" />
-                <Rect x="35" y="50" width={svgWidth - 50} height="20" fill={ZONE_COLORS[2]} opacity="0.9" />
-                <Rect x="35" y="70" width={svgWidth - 50} height="20" fill={ZONE_COLORS[1]} opacity="0.9" />
-                <Rect x="35" y="90" width={svgWidth - 50} height="20" fill={ZONE_COLORS[0]} opacity="0.9" />
-
-                {/* Etichette dei bpm sull'asse sinistro[cite: 7] */}
-                <SvgText x="30" y="15" fill="#aaa" fontSize="10" textAnchor="end">201</SvgText>
-                <SvgText x="30" y="35" fill="#aaa" fontSize="10" textAnchor="end">180</SvgText>
-                <SvgText x="30" y="55" fill="#aaa" fontSize="10" textAnchor="end">160</SvgText>
-                <SvgText x="30" y="75" fill="#aaa" fontSize="10" textAnchor="end">140</SvgText>
-                <SvgText x="30" y="95" fill="#aaa" fontSize="10" textAnchor="end">120</SvgText>
-                <SvgText x="30" y="115" fill="#aaa" fontSize="10" textAnchor="end">100</SvgText>
-
-                {/* Linee guida orizzontali[cite: 7] */}
-                <Line x1="35" y1="10" x2={svgWidth - 15} y2="10" stroke="#333" strokeWidth="0.5" />
-                <Line x1="35" y1="30" x2={svgWidth - 15} y2="30" stroke="#333" strokeWidth="0.5" />
-                <Line x1="35" y1="50" x2={svgWidth - 15} y2="50" stroke="#333" strokeWidth="0.5" />
-                <Line x1="35" y1="70" x2={svgWidth - 15} y2="70" stroke="#333" strokeWidth="0.5" />
-                <Line x1="35" y1="90" x2={svgWidth - 15} y2="90" stroke="#333" strokeWidth="0.5" />
-                <Line x1="35" y1="110" x2={svgWidth - 15} y2="110" stroke="#333" strokeWidth="0.5" />
-
-                {/* Sezione inferiore nera con la linea rossa continua dei battiti[cite: 7] */}
-                <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth="2.5" />
-              </Svg>
-            </View>
+            {/* Modale a schermo intero */}
+            <Modal visible={modalVisible} animationType="slide" transparent={false}>
+              <View style={styles.modalContainer}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Dettaglio Frequenza Cardiaca</Text>
+                  <Pressable onPress={() => setModalVisible(false)} style={styles.closeBtn}>
+                    <Text style={styles.closeText}>✕ Chiudi</Text>
+                  </Pressable>
+                </View>
+                <View style={styles.modalContent}>
+                  {renderSvgContent(Dimensions.get('window').width - 20, 400, true)}
+                </View>
+              </View>
+            </Modal>
 
             {!hasHr ? (
               <Text style={styles.muted}>Nessun dato di frequenza cardiaca registrato.</Text>
@@ -249,6 +272,52 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     marginBottom: 14,
     justifyContent: 'center',
+    position: 'relative',
+  },
+  zoomHint: {
+    position: 'absolute',
+    bottom: 6,
+    right: 8,
+    color: '#888',
+    fontSize: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: '#121212',
+    paddingTop: 50,
+    paddingHorizontal: 10,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingHorizontal: 10,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  closeBtn: {
+    backgroundColor: '#333',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  closeText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   muted: { fontSize: 14, color: colors.muted, marginTop: 6 },
   row: { flexDirection: 'row', alignItems: 'center', marginBottom: 6, gap: 8 },
