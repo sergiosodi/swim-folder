@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import Svg, { Path, Rect, Line } from 'react-native-svg';
+import Svg, { Path, Rect, Line, Text as SvgText } from 'react-native-svg';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/lib/theme';
 import type { Slot } from '@/lib/sessions';
@@ -16,7 +16,7 @@ type Exercise = {
   hr_samples?: { time: number; value: number }[] | null;
 };
 
-// Colori delle zone 1-5 di Polar (dalla 1 in basso alla 5 in alto)
+// Colori delle zone di Polar (dalla 1 in basso alla 5 in alto)
 const ZONE_COLORS = ['#B7C4C4', '#35B6E8', '#9BC53D', '#F5B400', '#E0185A'];
 
 function fmt(total: number) {
@@ -109,13 +109,12 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
         const maxTime = Math.max(1, ...zones.map((z) => z.seconds));
         const hasHr = zones.length > 0;
 
-        // Dimensioni ingrandite per una precisione visiva ottimale
         const svgWidth = 320;
-        const svgHeight = 180;
+        const svgHeight = 200;
 
-        // Scala dei battiti estesa per coprire accuratamente da sotto i 100 bpm fino a oltre i 200 bpm
-        const minBpm = 60;
-        const maxBpm = 210;
+        // Scala dei battiti identica a Polar (da 100 a 201 bpm)
+        const minBpm = 100;
+        const maxBpm = 201;
 
         const avgBpm = ex.avg_hr ?? 120;
         const peakBpm = ex.max_hr ?? 160;
@@ -124,9 +123,9 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
         const chartSamples = [];
         for (let i = 0; i < totalPoints; i++) {
           const progress = i / (totalPoints - 1);
-          const variation = Math.sin(progress * Math.PI * 2) * ((peakBpm - avgBpm) * 0.85);
+          const variation = Math.sin(progress * Math.PI * 2) * ((peakBpm - avgBpm) * 0.7);
           let bpm = Math.round(avgBpm + variation);
-          bpm = Math.max(minBpm, Math.min(maxBpm, bpm));
+          bpm = Math.max(60, Math.min(220, bpm)); // Permette di scendere sotto 100 o salire sopra 201
           chartSamples.push({ value: bpm });
         }
 
@@ -134,10 +133,10 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
         if (chartSamples.length > 1) {
           pathData = chartSamples
             .map((s: any, i: number) => {
-              const x = (i / (chartSamples.length - 1)) * svgWidth;
-              // Mappatura precisa sull'asse Y (i bpm alti in alto, quelli bassi in basso)
-              const y = svgHeight - ((s.value - minBpm) / (maxBpm - minBpm)) * svgHeight;
-              const clampedY = Math.max(5, Math.min(svgHeight - 5, y));
+              const x = 35 + (i / (chartSamples.length - 1)) * (svgWidth - 50);
+              // Area della curva posizionata nella parte bassa (tra y=110 e y=185)
+              const y = 185 - ((s.value - 60) / (220 - 60)) * 110;
+              const clampedY = Math.max(110, Math.min(190, y));
               return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${clampedY.toFixed(1)}`;
             })
             .join(' ');
@@ -156,24 +155,37 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
               {ex.max_hr != null ? `  ·  FC max ${ex.max_hr}` : ''}
             </Text>
 
-            {/* Box del Grafico ingrandito e preciso con le zone verticali */}
+            {/* Grafico stile Polar ufficiale con fasce in alto e linea rossa in basso */}
             <View style={styles.chartContainer}>
               <Svg height={svgHeight} width="100%" viewBox={`0 0 ${svgWidth} ${svgHeight}`}>
-                {/* 5 Zone verticali suddivise proporzionalmente sulla scala 60-210 bpm */}
-                <Rect x="0" y={svgHeight * 0.8} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[0]} opacity="0.35" />
-                <Rect x="0" y={svgHeight * 0.6} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[1]} opacity="0.35" />
-                <Rect x="0" y={svgHeight * 0.4} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[2]} opacity="0.35" />
-                <Rect x="0" y={svgHeight * 0.2} width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[3]} opacity="0.35" />
-                <Rect x="0" y="0" width={svgWidth} height={svgHeight * 0.2} fill={ZONE_COLORS[4]} opacity="0.35" />
+                {/* Sfondo nero generale */}
+                <Rect x="0" y="0" width={svgWidth} height={svgHeight} fill="#000000" />
 
-                {/* Linee guida di riferimento dei bpm (100, 130, 160, 190) */}
-                <Line x1="0" y1={svgHeight * 0.8} x2={svgWidth} y2={svgHeight * 0.8} stroke="#ffffff" strokeWidth="0.5" opacity="0.25" />
-                <Line x1="0" y1={svgHeight * 0.6} x2={svgWidth} y2={svgHeight * 0.6} stroke="#ffffff" strokeWidth="0.5" opacity="0.25" />
-                <Line x1="0" y1={svgHeight * 0.4} x2={svgWidth} y2={svgHeight * 0.4} stroke="#ffffff" strokeWidth="0.5" opacity="0.25" />
-                <Line x1="0" y1={svgHeight * 0.2} x2={svgWidth} y2={svgHeight * 0.2} stroke="#ffffff" strokeWidth="0.5" opacity="0.25" />
+                {/* 5 Fasce orizzontali delle zone in alto (stile Polar) */}
+                <Rect x="35" y="10" width={svgWidth - 50} height="20" fill={ZONE_COLORS[4]} opacity="0.9" />
+                <Rect x="35" y="30" width={svgWidth - 50} height="20" fill={ZONE_COLORS[3]} opacity="0.9" />
+                <Rect x="35" y="50" width={svgWidth - 50} height="20" fill={ZONE_COLORS[2]} opacity="0.9" />
+                <Rect x="35" y="70" width={svgWidth - 50} height="20" fill={ZONE_COLORS[1]} opacity="0.9" />
+                <Rect x="35" y="90" width={svgWidth - 50} height="20" fill={ZONE_COLORS[0]} opacity="0.9" />
 
-                {/* Linea continua rossa dei battiti cardiaci */}
-                <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth="3" />
+                {/* Etichette dei bpm sull'asse sinistro[cite: 7] */}
+                <SvgText x="30" y="15" fill="#aaa" fontSize="10" textAnchor="end">201</SvgText>
+                <SvgText x="30" y="35" fill="#aaa" fontSize="10" textAnchor="end">180</SvgText>
+                <SvgText x="30" y="55" fill="#aaa" fontSize="10" textAnchor="end">160</SvgText>
+                <SvgText x="30" y="75" fill="#aaa" fontSize="10" textAnchor="end">140</SvgText>
+                <SvgText x="30" y="95" fill="#aaa" fontSize="10" textAnchor="end">120</SvgText>
+                <SvgText x="30" y="115" fill="#aaa" fontSize="10" textAnchor="end">100</SvgText>
+
+                {/* Linee guida orizzontali[cite: 7] */}
+                <Line x1="35" y1="10" x2={svgWidth - 15} y2="10" stroke="#333" strokeWidth="0.5" />
+                <Line x1="35" y1="30" x2={svgWidth - 15} y2="30" stroke="#333" strokeWidth="0.5" />
+                <Line x1="35" y1="50" x2={svgWidth - 15} y2="50" stroke="#333" strokeWidth="0.5" />
+                <Line x1="35" y1="70" x2={svgWidth - 15} y2="70" stroke="#333" strokeWidth="0.5" />
+                <Line x1="35" y1="90" x2={svgWidth - 15} y2="90" stroke="#333" strokeWidth="0.5" />
+                <Line x1="35" y1="110" x2={svgWidth - 15} y2="110" stroke="#333" strokeWidth="0.5" />
+
+                {/* Sezione inferiore nera con la linea rossa continua dei battiti[cite: 7] */}
+                <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth="2.5" />
               </Svg>
             </View>
 
@@ -231,8 +243,8 @@ const styles = StyleSheet.create({
   start: { fontSize: 13, color: colors.muted },
   summary: { fontSize: 13, color: colors.muted, marginTop: 6, marginBottom: 12 },
   chartContainer: {
-    height: 180, // Altezza aumentata per dare ampio respiro al grafico
-    backgroundColor: '#121212',
+    height: 200,
+    backgroundColor: '#000000',
     borderRadius: 8,
     overflow: 'hidden',
     marginBottom: 14,
