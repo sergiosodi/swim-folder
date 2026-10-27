@@ -1,7 +1,7 @@
 // Funzione Supabase "polar"
 // - collega l'account Polar di un atleta o dell'allenatore (OAuth2)
 // - riceve da Polar la notifica "nuovo allenamento" (webhook)
-// - scarica zone e campioni di frequenza cardiaca per i grafici
+// - gestisce il salvataggio diretto o l'associazione automatica per nome atleta
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -100,7 +100,7 @@ function isoToSeconds(val: any): number {
 
 // ---------- dati di Polar ----------
 
-function toRow(userId: string, ex: any, samples: any = null) {
+function toRow(userId: string, ex: any, hrSamples: any = []) {
   if (!ex?.id || !ex?.start_time) return null;
   const start = String(ex.start_time);
   const hour = Number(start.slice(11, 13));
@@ -116,9 +116,6 @@ function toRow(userId: string, ex: any, samples: any = null) {
         .sort((a: any, b: any) => a.index - b.index)
     : [];
 
-  // Estrae i campioni di frequenza cardiaca per il grafico a linee
-  const hrSamples = samples?.heart_rate ?? samples?.samples ?? [];
-
   return {
     user_id: userId,
     polar_exercise_id: String(ex.id),
@@ -129,7 +126,7 @@ function toRow(userId: string, ex: any, samples: any = null) {
     avg_hr: ex.heart_rate?.average ?? null,
     max_hr: ex.heart_rate?.maximum ?? null,
     zones,
-    hr_samples: hrSamples, // Salviamo i campioni per il grafico continuo
+    hr_samples: hrSamples,
   };
 }
 
@@ -139,14 +136,13 @@ async function disconnectLocal(userId: string, deleteData: boolean) {
   await admin.from('polar_connections').delete().eq('user_id', userId);
 }
 
-// Scarica gli allenamenti degli ultimi 30 giorni (con le zone e i campioni) e li salva
+// Scarica gli allenamenti e i campioni di frequenza cardiaca
 async function syncUser(userId: string, token: string) {
   const res = await fetch(`${API}/exercises?zones=true`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
 
   if (res.status === 401) {
-    // l'atleta ha revocato l'accesso dal suo account Polar
     await disconnectLocal(userId, false);
     return { ok: false, status: 401, error: 'Accesso Polar revocato' };
   }
@@ -160,7 +156,6 @@ async function syncUser(userId: string, token: string) {
   for (const ex of exercises) {
     if (!ex?.id) continue;
 
-    // --- AGGIUNGI QUI IL BLOCCO PER I CAMPIONI ---
     let hrSamples = [];
     try {
       const sampRes = await fetch(`${API}/exercises/${ex.id}/samples`, {
@@ -168,15 +163,13 @@ async function syncUser(userId: string, token: string) {
       });
       if (sampRes.ok) {
         const sampData = await sampRes.json();
-        // Cerca i campioni in tutte le possibili proprietà restituite da Polar
         hrSamples = sampData.samples || sampData.heart_rate_samples || sampData.heart_rate || [];
       }
     } catch (_) {
       // Ignora se non ci sono campioni
     }
-    // ---------------------------------------------
 
-    const row = toRow(userId, ex, { heart_rate: hrSamples });
+    const row = toRow(userId, ex, hrSamples);
     if (row) rows.push(row);
   }
 
@@ -273,7 +266,6 @@ async function handleWebhook(req: Request) {
   const polarUserId = String(payload.user_id);
   const exerciseId = String(payload.entity_id || payload.exercise_id);
 
-  // 1. Cerca se questo polar_user_id appartiene direttamente a un ATLETA
   const { data: athleteToken } = await admin
     .from('polar_tokens')
     .select('user_id, access_token')
@@ -285,7 +277,6 @@ async function handleWebhook(req: Request) {
     return new Response('ok', { status: 200 });
   }
 
-  // 2. Altrimenti, verifica se appartiene all'allenatore
   const { data: coachTokenRecord } = await admin
     .from('polar_tokens')
     .select('user_id, access_token')
@@ -310,15 +301,18 @@ async function handleWebhook(req: Request) {
           .maybeSingle();
 
         if (matchedAthlete) {
-          let samples = null;
+          let hrSamples = [];
           try {
             const sampRes = await fetch(`${API}/exercises/${exerciseId}/samples`, {
               headers: { Authorization: `Bearer ${coachToken}`, Accept: 'application/json' },
             });
-            if (sampRes.ok) samples = await sampRes.json();
+            if (sampRes.ok) {
+              const sampData = await sampRes.json();
+              hrSamples = sampData.samples || sampData.heart_rate_samples || sampData.heart_rate || [];
+            }
           } catch (_) {}
 
-          const row = toRow(matchedAthlete.id as string, exData, samples);
+          const row = toRow(matchedAthlete.id as string, exData, hrSamples);
           if (row) {
             await admin
               .from('polar_exercises')
