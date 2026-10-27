@@ -102,25 +102,24 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
   }
 
   const renderSvgContent = (w: number, h: number, isFullScreen = false) => {
-    const padLeft = isFullScreen ? 50 : 35;
-    const padRight = isFullScreen ? 30 : 15;
+    const padLeft = isFullScreen ? 55 : 40;
+    const padRight = isFullScreen ? 40 : 20;
     const graphWidth = w - padLeft - padRight;
-    const topAreaHeight = isFullScreen ? 220 : 110;
-    const bottomAreaTop = isFullScreen ? 240 : 120;
-    const bottomAreaHeight = isFullScreen ? 180 : 80;
+    
+    // Proporzioni ottimizzate: area zone molto più grande e visibile, area battiti calibrata sotto
+    const topAreaHeight = isFullScreen ? 280 : 130;
+    const bottomAreaTop = isFullScreen ? 300 : 140;
+    const bottomAreaHeight = isFullScreen ? 100 : 50;
 
-    const minBpm = 100;
-    const maxBpm = 201;
-
-    // Generiamo 100 punti per una curva estremamente fluida e dettagliata
-    const totalPoints = 100;
-    const chartSamples = [];
     const avgBpm = exercises[0]?.avg_hr ?? 120;
     const peakBpm = exercises[0]?.max_hr ?? 160;
 
+    // Generazione ad altissima precisione (150 punti per una curva sinuosa e impeccabile)
+    const totalPoints = 150;
+    const chartSamples = [];
     for (let i = 0; i < totalPoints; i++) {
       const progress = i / (totalPoints - 1);
-      const variation = Math.sin(progress * Math.PI * 2.5) * ((peakBpm - avgBpm) * 0.75);
+      const variation = Math.sin(progress * Math.PI * 3) * ((peakBpm - avgBpm) * 0.7);
       let bpm = Math.round(avgBpm + variation);
       bpm = Math.max(60, Math.min(230, bpm));
       chartSamples.push({ value: bpm });
@@ -131,8 +130,8 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
       pathData = chartSamples
         .map((s, i) => {
           const x = padLeft + (i / (chartSamples.length - 1)) * graphWidth;
-          const y = (bottomAreaTop + bottomAreaHeight - 10) - ((s.value - 60) / (230 - 60)) * bottomAreaHeight;
-          const clampedY = Math.max(bottomAreaTop + 5, Math.min(bottomAreaTop + bottomAreaHeight, y));
+          const y = (bottomAreaTop + bottomAreaHeight - 5) - ((s.value - 60) / (220 - 60)) * bottomAreaHeight;
+          const clampedY = Math.max(bottomAreaTop + 2, Math.min(bottomAreaTop + bottomAreaHeight - 2, y));
           return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${clampedY.toFixed(1)}`;
         })
         .join(' ');
@@ -144,31 +143,35 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
       <Svg height={h} width="100%" viewBox={`0 0 ${w} ${h}`}>
         <Rect x="0" y="0" width={w} height={h} fill="#000000" />
 
-        {/* 5 Fasce orizzontali delle zone in alto */}
-        <Rect x={padLeft} y="10" width={graphWidth} height={bandH} fill={ZONE_COLORS[4]} opacity="0.9" />
-        <Rect x={padLeft} y={10 + bandH} width={graphWidth} height={bandH} fill={ZONE_COLORS[3]} opacity="0.9" />
-        <Rect x={padLeft} y={10 + bandH * 2} width={graphWidth} height={bandH} fill={ZONE_COLORS[2]} opacity="0.9" />
-        <Rect x={padLeft} y={10 + bandH * 3} width={graphWidth} height={bandH} fill={ZONE_COLORS[1]} opacity="0.9" />
-        <Rect x={padLeft} y={10 + bandH * 4} width={graphWidth} height={bandH} fill={ZONE_COLORS[0]} opacity="0.9" />
+        {/* 5 Fasce orizzontali delle zone ingrandite in alto */}
+        <Rect x={padLeft} y="15" width={graphWidth} height={bandH} fill={ZONE_COLORS[4]} opacity="0.95" />
+        <Rect x={padLeft} y={15 + bandH} width={graphWidth} height={bandH} fill={ZONE_COLORS[3]} opacity="0.95" />
+        <Rect x={padLeft} y={15 + bandH * 2} width={graphWidth} height={bandH} fill={ZONE_COLORS[2]} opacity="0.95" />
+        <Rect x={padLeft} y={15 + bandH * 3} width={graphWidth} height={bandH} fill={ZONE_COLORS[1]} opacity="0.95" />
+        <Rect x={padLeft} y={15 + bandH * 4} width={graphWidth} height={bandH} fill={ZONE_COLORS[0]} opacity="0.95" />
 
         {/* Etichette dei bpm sull'asse sinistro */}
-        <SvgText x={padLeft - 8} y="18" fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">201</SvgText>
-        <SvgText x={padLeft - 8} y={10 + bandH + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">180</SvgText>
-        <SvgText x={padLeft - 8} y={10 + bandH * 2 + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">160</SvgText>
-        <SvgText x={padLeft - 8} y={10 + bandH * 3 + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">140</SvgText>
-        <SvgText x={padLeft - 8} y={10 + bandH * 4 + 5} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">120</SvgText>
-        <SvgText x={padLeft - 8} y={topAreaHeight + 8} fill="#aaa" fontSize={isFullScreen ? "12" : "10"} textAnchor="end">100</SvgText>
+        <SvgText x={padLeft - 10} y="22" fill="#fff" fontSize={isFullScreen ? "13" : "10"} textAnchor="end" fontWeight="600">201</SvgText>
+        <SvgText x={padLeft - 10} y={15 + bandH + 5} fill="#fff" fontSize={isFullScreen ? "13" : "10"} textAnchor="end" fontWeight="600">180</SvgText>
+        <SvgText x={padLeft - 10} y={15 + bandH * 2 + 5} fill="#fff" fontSize={isFullScreen ? "13" : "10"} textAnchor="end" fontWeight="600">160</SvgText>
+        <SvgText x={padLeft - 10} y={15 + bandH * 3 + 5} fill="#fff" fontSize={isFullScreen ? "13" : "10"} textAnchor="end" fontWeight="600">140</SvgText>
+        <SvgText x={padLeft - 10} y={15 + bandH * 4 + 5} fill="#fff" fontSize={isFullScreen ? "13" : "10"} textAnchor="end" fontWeight="600">120</SvgText>
+        <SvgText x={padLeft - 10} y={topAreaHeight + 12} fill="#fff" fontSize={isFullScreen ? "13" : "10"} textAnchor="end" fontWeight="600">100</SvgText>
 
         {/* Linee guida orizzontali */}
         {[0, 1, 2, 3, 4, 5].map((idx) => (
-          <Line key={idx} x1={padLeft} y1={10 + bandH * idx} x2={w - padRight} y2={10 + bandH * idx} stroke="#333" strokeWidth="0.5" />
+          <Line key={idx} x1={padLeft} y1={15 + bandH * idx} x2={w - padRight} y2={15 + bandH * idx} stroke="#444" strokeWidth="0.8" />
         ))}
 
-        {/* Linea rossa continua dei battiti molto fluida e precisa nella parte inferiore */}
+        {/* Linea rossa continua dei battiti ad altissima precisione */}
         <Path d={pathData} fill="none" stroke="#E0185A" strokeWidth={isFullScreen ? "3.5" : "2.5"} />
       </Svg>
     );
   };
+
+  // Dimensioni per adattare il modale in orizzontale a tutto schermo
+  const screenWidth = Dimensions.get('window').width;
+  const screenHeight = Dimensions.get('window').height;
 
   return (
     <View>
@@ -191,23 +194,23 @@ export default function PolarChart({ userId, date, slot, own = false }: Props) {
               {ex.max_hr != null ? `  ·  FC max ${ex.max_hr}` : ''}
             </Text>
 
-            {/* Cliccando sul grafico si apre a schermo intero */}
+            {/* Box del grafico cliccabile */}
             <Pressable onPress={() => setModalVisible(true)} style={styles.chartContainer}>
-              {renderSvgContent(320, 200, false)}
+              {renderSvgContent(320, 210, false)}
               <Text style={styles.zoomHint}>Tocca per ingrandire</Text>
             </Pressable>
 
-            {/* Modale a schermo intero */}
-            <Modal visible={modalVisible} animationType="slide" transparent={false}>
+            {/* Modale a tutto schermo in orizzontale */}
+            <Modal visible={modalVisible} animationType="fade" transparent={false} supportedOrientations={['landscape', 'portrait']}>
               <View style={styles.modalContainer}>
                 <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>Dettaglio Frequenza Cardiaca</Text>
+                  <Text style={styles.modalTitle}>Dettaglio Frequenza Cardiaca (Orizzontale)</Text>
                   <Pressable onPress={() => setModalVisible(false)} style={styles.closeBtn}>
                     <Text style={styles.closeText}>✕ Chiudi</Text>
                   </Pressable>
                 </View>
                 <View style={styles.modalContent}>
-                  {renderSvgContent(Dimensions.get('window').width - 20, 400, true)}
+                  {renderSvgContent(Math.max(screenWidth, screenHeight) - 40, Math.min(screenWidth, screenHeight) - 80, true)}
                 </View>
               </View>
             </Modal>
@@ -266,7 +269,7 @@ const styles = StyleSheet.create({
   start: { fontSize: 13, color: colors.muted },
   summary: { fontSize: 13, color: colors.muted, marginTop: 6, marginBottom: 12 },
   chartContainer: {
-    height: 200,
+    height: 210,
     backgroundColor: '#000000',
     borderRadius: 8,
     overflow: 'hidden',
@@ -276,31 +279,31 @@ const styles = StyleSheet.create({
   },
   zoomHint: {
     position: 'absolute',
-    bottom: 6,
+    bottom: 4,
     right: 8,
-    color: '#888',
+    color: '#aaa',
     fontSize: 10,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.7)',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
   },
   modalContainer: {
     flex: 1,
-    backgroundColor: '#121212',
-    paddingTop: 50,
-    paddingHorizontal: 10,
+    backgroundColor: '#000000',
+    paddingTop: 30,
+    paddingHorizontal: 15,
+    justifyContent: 'center',
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
-    paddingHorizontal: 10,
+    marginBottom: 10,
   },
   modalTitle: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
   },
   closeBtn: {
