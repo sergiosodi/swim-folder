@@ -1,7 +1,7 @@
 // Funzione Supabase "polar"
-// - collega l'account Polar di un atleta o dell'allenatore (OAuth2)
+// - collega l'account Polar di un atleta (OAuth2)
 // - riceve da Polar la notifica "nuovo allenamento" (webhook)
-// - gestisce il salvataggio diretto o l'associazione automatica per nome atleta
+// - salva zone di frequenza cardiaca e andamento della frequenza cardiaca
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -17,6 +17,10 @@ const API = 'https://www.polaraccesslink.com/v3';
 
 // Gli allenamenti iniziati prima di questa ora sono "mattina", gli altri "pomeriggio"
 const MORNING_BEFORE_HOUR = 13;
+// Massimo di punti salvati per il grafico della frequenza cardiaca
+const MAX_POINTS = 900;
+// Polar elenca solo gli ultimi 30 giorni: la pulizia riguarda solo questa finestra
+const WINDOW_DAYS = 29;
 
 const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
@@ -61,7 +65,6 @@ function safeEqual(a: string, b: string) {
 const b64url = (s: string) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const unb64url = (s: string) => atob(s.replace(/-/g, '+').replace(/_/g, '/'));
 
-// "state": dice a quale utente appartiene il collegamento, firmato e valido 15 minuti
 async function makeState(userId: string) {
   const payload = b64url(JSON.stringify({ u: userId, e: Date.now() + 15 * 60 * 1000 }));
   return `${payload}.${await hmacHex(CLIENT_SECRET, payload)}`;
@@ -79,15 +82,18 @@ async function readState(state: string): Promise<string | null> {
   }
 }
 
-// "PT1H5M12S" -> secondi
+function num(v: any): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// "PT1H5M12.5S" -> secondi (accetta anche numeri)
 function isoToSeconds(val: any): number {
   if (!val) return 0;
-  if (typeof val === 'number') {
-    return val > 10000 ? Math.round(val / 1000) : Math.round(val);
-  }
+  if (typeof val === 'number') return val > 10000 ? Math.round(val / 1000) : Math.round(val);
   const iso = String(val);
   if (!iso.startsWith('P')) return Number(iso) || 0;
-  
   const m = iso.match(
     /^P(?:(\d+)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/
   );
@@ -100,21 +106,115 @@ function isoToSeconds(val: any): number {
 
 // ---------- dati di Polar ----------
 
-function toRow(userId: string, ex: any, hrSamples: any = []) {
-  if (!ex?.id || !ex?.start_time) return null;
-  const start = String(ex.start_time);
-  const hour = Number(start.slice(11, 13));
+type Zone = { index: number; lower: number | null; upper: number | null; seconds: number };
+type Series = { rate: number; values: (number | null)[] };
 
-  const zones = Array.isArray(ex.heart_rate_zones)
-    ? ex.heart_rate_zones
-        .map((z: any) => ({
-          index: Number(z.index),
-          lower: z['lower-limit'] ?? null,
-          upper: z['upper-limit'] ?? null,
-          seconds: isoToSeconds(z['in-zone']),
-        }))
-        .sort((a: any, b: any) => a.index - b.index)
-    : [];
+// Legge le zone accettando più varianti dei nomi dei campi
+function parseZones(raw: any): Zone[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((z: any, i: number) => ({
+      index: num(z?.index) ?? i + 1,
+      lower: num(z?.['lower-limit'] ?? z?.lower_limit ?? z?.lowerLimit ?? z?.lower),
+      upper: num(z?.['upper-limit'] ?? z?.upper_limit ?? z?.upperLimit ?? z?.upper),
+      seconds: isoToSeconds(z?.['in-zone'] ?? z?.in_zone ?? z?.inZone ?? z?.duration),
+    }))
+    .sort((a: Zone, b: Zone) => a.index - b.index);
+}
+
+// Tra le serie di campioni sceglie quella della frequenza cardiaca
+function pickHeartRate(samples: any, avgHr: number | null): Series | null {
+  if (!Array.isArray(samples)) return null;
+
+  const candidates = samples
+    .map((s: any) => {
+      const values: (number | null)[] = String(s?.data ?? '')
+        .split(',')
+        .map((t) => {
+          const x = t.trim();
+          if (x === '' || x === 'null') return null;
+          const n = Number(x);
+          return Number.isFinite(n) ? n : null;
+        });
+      const nums = values.filter((v): v is number => v !== null);
+      const plausible = nums.filter((v) => v >= 30 && v <= 230).length;
+      const mean = nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+      return {
+        type: String(s?.['sample-type'] ?? ''),
+        rate: Number(s?.['recording-rate']) || 0,
+        values,
+        mean,
+        ok: nums.length > 10 && plausible / nums.length > 0.8 && mean > 45,
+      };
+    })
+    .filter((c) => c.rate > 0 && c.ok);
+
+  if (candidates.length === 0) return null;
+
+  // Il codice "0" dovrebbe essere la frequenza cardiaca; la media vicina a quella dell'allenamento conferma
+  const score = (c: { type: string; mean: number }) =>
+    (avgHr ? Math.abs(c.mean - avgHr) : 0) + (c.type === '0' ? 0 : 5);
+  candidates.sort((a, b) => score(a) - score(b));
+  return { rate: candidates[0].rate, values: candidates[0].values };
+}
+
+// Se Polar manda le zone a zero, il tempo in ogni zona si calcola dai campioni
+function secondsFromSamples(zones: Zone[], series: Series): number[] {
+  const out = zones.map(() => 0);
+  const top = zones.length - 1;
+  for (const v of series.values) {
+    if (v === null) continue;
+    for (let i = 0; i < zones.length; i++) {
+      const lo = zones[i].lower as number;
+      const hi = zones[i].upper as number;
+      if (v >= lo && (v < hi || (i === top && v <= hi))) {
+        out[i] += series.rate;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Riduce i punti a una quantità gestibile facendo la media
+function downsample(series: Series): Series {
+  if (series.values.length <= MAX_POINTS) return series;
+  const step = Math.ceil(series.values.length / MAX_POINTS);
+  const values: (number | null)[] = [];
+  for (let i = 0; i < series.values.length; i += step) {
+    const chunk = series.values.slice(i, i + step).filter((v): v is number => v !== null);
+    values.push(chunk.length ? Math.round(chunk.reduce((a, b) => a + b, 0) / chunk.length) : null);
+  }
+  return { rate: series.rate * step, values };
+}
+
+// detailed = true se l'esercizio è stato scaricato con i campioni
+function toRow(userId: string, ex: any, detailed: boolean) {
+  if (!ex?.id || !ex?.start_time) return null;
+  const start = String(ex.start_time); // ora locale, es. 2026-10-05T17:30:00
+  const hour = Number(start.slice(11, 13));
+  const avgHr = num(ex.heart_rate?.average);
+
+  const zones = parseZones(ex.heart_rate_zones);
+  const series = detailed ? pickHeartRate(ex.samples, avgHr) : null;
+
+  const polarTotal = zones.reduce((a, z) => a + z.seconds, 0);
+  const hasLimits = zones.length > 0 && zones.every((z) => z.lower !== null && z.upper !== null);
+  if (polarTotal === 0 && series && hasLimits) {
+    const calc = secondsFromSamples(zones, series);
+    zones.forEach((z, i) => (z.seconds = calc[i]));
+  }
+
+  const stored = series ? downsample(series) : null;
+
+  console.log(
+    'Polar esercizio', ex.id,
+    '| zone:', zones.length,
+    '| secondi da Polar:', polarTotal,
+    '| limiti:', hasLimits,
+    '| tipi campioni:', Array.isArray(ex.samples) ? ex.samples.map((s: any) => s?.['sample-type']).join(',') : 'nessuno',
+    '| frequenza cardiaca trovata:', !!series
+  );
 
   return {
     user_id: userId,
@@ -123,10 +223,13 @@ function toRow(userId: string, ex: any, hrSamples: any = []) {
     slot: hour < MORNING_BEFORE_HOUR ? 'morning' : 'afternoon',
     start_time: start,
     duration_seconds: isoToSeconds(ex.duration),
-    avg_hr: ex.heart_rate?.average ?? null,
-    max_hr: ex.heart_rate?.maximum ?? null,
+    avg_hr: avgHr,
+    max_hr: num(ex.heart_rate?.maximum),
     zones,
-    hr_samples: hrSamples,
+    raw_zones: ex.heart_rate_zones ?? null,
+    hr_samples: stored ? stored.values : [],
+    // null = campioni da scaricare ancora, 0 = scaricati ma senza frequenza cardiaca
+    hr_rate: detailed ? (stored ? stored.rate : 0) : null,
   };
 }
 
@@ -136,40 +239,68 @@ async function disconnectLocal(userId: string, deleteData: boolean) {
   await admin.from('polar_connections').delete().eq('user_id', userId);
 }
 
-// Scarica gli allenamenti e i campioni di frequenza cardiaca
-async function syncUser(userId: string, token: string) {
-  const res = await fetch(`${API}/exercises?zones=true`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+function polarGet(path: string, token: string) {
+  return fetch(`${API}${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      'User-Agent': 'SwimApp/1.0',
+    },
   });
+}
+
+// Scarica gli allenamenti degli ultimi 30 giorni e salva quelli nuovi con zone e campioni
+async function syncUser(userId: string, token: string) {
+  const res = await polarGet('/exercises?zones=true', token);
 
   if (res.status === 401) {
+    // l'atleta ha revocato l'accesso dal suo account Polar
     await disconnectLocal(userId, false);
     return { ok: false, status: 401, error: 'Accesso Polar revocato' };
   }
-  if (res.status === 204) return { ok: true, count: 0 };
-  if (!res.ok) return { ok: false, status: res.status, error: 'Polar ha risposto con un errore' };
+  if (!res.ok && res.status !== 204) {
+    return { ok: false, status: res.status, error: 'Polar ha risposto con un errore' };
+  }
 
-  const list = await res.json();
-  const exercises = Array.isArray(list) ? list : [];
+  const list = res.status === 204 ? [] : await res.json();
+  const exercises: any[] = Array.isArray(list) ? list : [];
+  const activeIds = new Set(exercises.filter((e) => e?.id).map((e) => String(e.id)));
+
+  // Cosa abbiamo già salvato
+  const { data: stored } = await admin
+    .from('polar_exercises')
+    .select('polar_exercise_id, hr_rate, start_time')
+    .eq('user_id', userId);
+  const storedRows = (stored ?? []) as {
+    polar_exercise_id: string;
+    hr_rate: number | null;
+    start_time: string;
+  }[];
+  const done = new Set(storedRows.filter((r) => r.hr_rate !== null).map((r) => r.polar_exercise_id));
+
+  // Solo gli allenamenti senza campioni vengono scaricati (e salvati) di nuovo
   const rows = [];
-
   for (const ex of exercises) {
-    if (!ex?.id) continue;
+    if (!ex?.id || done.has(String(ex.id))) continue;
 
-    let hrSamples = [];
+    let full = ex;
+    let detailed = false;
     try {
-      const sampRes = await fetch(`${API}/exercises/${ex.id}/samples`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      });
-      if (sampRes.ok) {
-        const sampData = await sampRes.json();
-        hrSamples = sampData.samples || sampData.heart_rate_samples || sampData.heart_rate || [];
+      const r = await polarGet(
+        `/exercises/${encodeURIComponent(String(ex.id))}?zones=true&samples=true`,
+        token
+      );
+      if (r.ok) {
+        full = await r.json();
+        detailed = true;
+      } else {
+        console.error('Dettaglio esercizio non disponibile', ex.id, r.status);
       }
-    } catch (_) {
-      // Ignora se non ci sono campioni
+    } catch (e) {
+      console.error('Errore nel dettaglio esercizio', ex.id, e);
     }
 
-    const row = toRow(userId, ex, hrSamples);
+    const row = toRow(userId, full, detailed);
     if (row) rows.push(row);
   }
 
@@ -179,6 +310,20 @@ async function syncUser(userId: string, token: string) {
       .upsert(rows as Record<string, unknown>[], { onConflict: 'user_id,polar_exercise_id' });
     if (error) return { ok: false, status: 500, error: error.message };
   }
+
+  // Toglie solo gli allenamenti recenti che non ci sono più su Polar (mai lo storico più vecchio)
+  const windowStart = new Date(Date.now() - WINDOW_DAYS * 86400000).toISOString().slice(0, 19);
+  const toDelete = storedRows
+    .filter((r) => r.start_time >= windowStart && !activeIds.has(r.polar_exercise_id))
+    .map((r) => r.polar_exercise_id);
+  if (toDelete.length > 0) {
+    await admin
+      .from('polar_exercises')
+      .delete()
+      .eq('user_id', userId)
+      .in('polar_exercise_id', toDelete);
+  }
+
   return { ok: true, count: rows.length };
 }
 
@@ -186,7 +331,6 @@ async function syncUser(userId: string, token: string) {
 
 async function handleCallback(url: URL) {
   const back = (q: string) => Response.redirect(`${APP_URL}/profile?polar=${q}`, 302);
-
   if (url.searchParams.get('error')) return back('annullato');
 
   const userId = await readState(url.searchParams.get('state') ?? '');
@@ -207,15 +351,13 @@ async function handleCallback(url: URL) {
         redirect_uri: REDIRECT_URI,
       }),
     });
-    if (!tokenRes.ok) {
-      console.error('Token Polar rifiutato', tokenRes.status, await tokenRes.text());
-      return back('errore');
-    }
+    if (!tokenRes.ok) return back('errore');
     const tok = await tokenRes.json();
     const accessToken = String(tok.access_token);
     const polarUserId = String(tok.x_user_id);
 
-    const reg = await fetch(`${API}/users`, {
+    // Registra l'utente (se è già registrato Polar risponde 409: va bene)
+    await fetch(`${API}/users`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -223,11 +365,7 @@ async function handleCallback(url: URL) {
         Accept: 'application/json',
       },
       body: JSON.stringify({ 'member-id': userId }),
-    });
-    if (!reg.ok && reg.status !== 409) {
-      console.error('Registrazione utente Polar fallita', reg.status, await reg.text());
-      return back('errore');
-    }
+    }).catch(() => {});
 
     await admin
       .from('polar_tokens')
@@ -240,8 +378,7 @@ async function handleCallback(url: URL) {
       .upsert({ user_id: userId, connected_at: new Date().toISOString() }, { onConflict: 'user_id' });
 
     return back('ok');
-  } catch (e) {
-    console.error(e);
+  } catch {
     return back('errore');
   }
 }
@@ -253,76 +390,32 @@ async function handleWebhook(req: Request) {
   const raw = await req.text();
 
   if (event === 'PING') return new Response('ok', { status: 200 });
-
   if (!WEBHOOK_SECRET) return new Response('webhook non configurato', { status: 500 });
+
   const sig = req.headers.get('polar-webhook-signature') ?? '';
   if (!safeEqual(sig, await hmacHex(WEBHOOK_SECRET, raw))) {
     return new Response('firma non valida', { status: 401 });
   }
 
-  if (event !== 'EXERCISE') return new Response('ok', { status: 200 });
-
   const payload = JSON.parse(raw);
-  const polarUserId = String(payload.user_id);
-  const exerciseId = String(payload.entity_id || payload.exercise_id);
 
-  const { data: athleteToken } = await admin
-    .from('polar_tokens')
-    .select('user_id, access_token')
-    .eq('polar_user_id', polarUserId)
-    .maybeSingle();
-
-  if (athleteToken) {
-    await syncUser(athleteToken.user_id as string, athleteToken.access_token as string);
+  if (event === 'EXERCISE_DELETED' || event === 'DELETED') {
+    const exerciseId = String(payload.entity_id || payload.exercise_id);
+    if (exerciseId) {
+      await admin.from('polar_exercises').delete().eq('polar_exercise_id', exerciseId);
+    }
     return new Response('ok', { status: 200 });
   }
 
-  const { data: coachTokenRecord } = await admin
+  if (event !== 'EXERCISE') return new Response('ok', { status: 200 });
+
+  const { data: t } = await admin
     .from('polar_tokens')
     .select('user_id, access_token')
-    .eq('polar_user_id', polarUserId)
+    .eq('polar_user_id', String(payload.user_id))
     .maybeSingle();
 
-  if (coachTokenRecord) {
-    const coachToken = coachTokenRecord.access_token;
-    const exRes = await fetch(`${API}/exercises/${exerciseId}?zones=true`, {
-      headers: { Authorization: `Bearer ${coachToken}`, Accept: 'application/json' },
-    });
-
-    if (exRes.ok) {
-      const exData = await exRes.json();
-      const polarAthleteName = exData.participant?.name || exData.name;
-
-      if (polarAthleteName) {
-        const { data: matchedAthlete } = await admin
-          .from('profiles')
-          .select('id')
-          .ilike('name', polarAthleteName)
-          .maybeSingle();
-
-        if (matchedAthlete) {
-          let hrSamples = [];
-          try {
-            const sampRes = await fetch(`${API}/exercises/${exerciseId}/samples`, {
-              headers: { Authorization: `Bearer ${coachToken}`, Accept: 'application/json' },
-            });
-            if (sampRes.ok) {
-              const sampData = await sampRes.json();
-              hrSamples = sampData.samples || sampData.heart_rate_samples || sampData.heart_rate || [];
-            }
-          } catch (_) {}
-
-          const row = toRow(matchedAthlete.id as string, exData, hrSamples);
-          if (row) {
-            await admin
-              .from('polar_exercises')
-              .upsert(row, { onConflict: 'user_id,polar_exercise_id' });
-          }
-        }
-      }
-    }
-  }
-
+  if (t) await syncUser(t.user_id as string, t.access_token as string);
   return new Response('ok', { status: 200 });
 }
 
