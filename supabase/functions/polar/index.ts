@@ -21,6 +21,8 @@ const MORNING_BEFORE_HOUR = 13;
 const MAX_POINTS = 900;
 // Polar elenca solo gli ultimi 30 giorni: la pulizia riguarda solo questa finestra
 const WINDOW_DAYS = 29;
+// Se la frequenza cardiaca manca, si riprova per qualche giorno
+const RETRY_DAYS = 3;
 
 const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
@@ -109,7 +111,6 @@ function isoToSeconds(val: any): number {
 type Zone = { index: number; lower: number | null; upper: number | null; seconds: number };
 type Series = { rate: number; values: (number | null)[] };
 
-// Legge le zone accettando più varianti dei nomi dei campi
 function parseZones(raw: any): Zone[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -122,29 +123,52 @@ function parseZones(raw: any): Zone[] {
     .sort((a: Zone, b: Zone) => a.index - b.index);
 }
 
+// "0,100,102,,98" -> [0,100,102,null,98]
+function parseData(data: any): (number | null)[] {
+  const parts: any[] = Array.isArray(data) ? data : String(data ?? '').split(',');
+  return parts.map((t) => {
+    if (t === null || t === undefined) return null;
+    const x = String(t).trim();
+    if (x === '' || x === 'null') return null;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  });
+}
+
+// Riassunto di cosa ha mandato Polar (per la diagnostica)
+function describeSamples(samples: any) {
+  if (!Array.isArray(samples)) return [];
+  return samples.map((s: any) => ({
+    type: String(s?.['sample-type'] ?? '?'),
+    rate: num(s?.['recording-rate'] ?? s?.recording_rate ?? s?.recordingRate),
+    n: parseData(s?.data).length,
+  }));
+}
+
 // Tra le serie di campioni sceglie quella della frequenza cardiaca
-function pickHeartRate(samples: any, avgHr: number | null): Series | null {
+function pickHeartRate(samples: any, avgHr: number | null, durationSeconds: number): Series | null {
   if (!Array.isArray(samples)) return null;
 
   const candidates = samples
     .map((s: any) => {
-      const values: (number | null)[] = String(s?.data ?? '')
-        .split(',')
-        .map((t) => {
-          const x = t.trim();
-          if (x === '' || x === 'null') return null;
-          const n = Number(x);
-          return Number.isFinite(n) ? n : null;
-        });
-      const nums = values.filter((v): v is number => v !== null);
-      const plausible = nums.filter((v) => v >= 30 && v <= 230).length;
-      const mean = nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+      const raw = parseData(s?.data);
+      // In acqua il sensore ottico perde spesso il segnale: valori fuori da 30-230 = dato mancante
+      const values = raw.map((v) => (v !== null && v >= 30 && v <= 230 ? v : null));
+      const valid = values.filter((v): v is number => v !== null);
+      const nonZero = raw.filter((v): v is number => v !== null && v > 0);
+      const share = nonZero.length ? valid.length / nonZero.length : 0;
+      const mean = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0;
+
+      let rate = num(s?.['recording-rate'] ?? s?.recording_rate ?? s?.recordingRate) ?? 0;
+      if (rate <= 0 && values.length > 1 && durationSeconds > 0) {
+        rate = Math.max(1, Math.round(durationSeconds / values.length));
+      }
       return {
         type: String(s?.['sample-type'] ?? ''),
-        rate: Number(s?.['recording-rate']) || 0,
+        rate,
         values,
         mean,
-        ok: nums.length > 10 && plausible / nums.length > 0.8 && mean > 45,
+        ok: valid.length >= 3 && share > 0.8 && mean > 35,
       };
     })
     .filter((c) => c.rate > 0 && c.ok);
@@ -156,6 +180,68 @@ function pickHeartRate(samples: any, avgHr: number | null): Series | null {
     (avgHr ? Math.abs(c.mean - avgHr) : 0) + (c.type === '0' ? 0 : 5);
   candidates.sort((a, b) => score(a) - score(b));
   return { rate: candidates[0].rate, values: candidates[0].values };
+}
+
+// Seconda fonte: il file TCX dell'allenamento contiene i battiti con l'orario
+async function hrFromTcx(
+  id: string,
+  token: string,
+  debug: Record<string, unknown>
+): Promise<Series | null> {
+  try {
+    const r = await polarGet(`/exercises/${encodeURIComponent(id)}/tcx`, token);
+    if (!r.ok) {
+      debug.tcx = `HTTP ${r.status}`;
+      return null;
+    }
+
+    let buf = new Uint8Array(await r.arrayBuffer());
+    if (buf[0] === 0x1f && buf[1] === 0x8b) {
+      // file compresso (gzip)
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+      buf = new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    const xml = new TextDecoder().decode(buf);
+
+    const times: number[] = [];
+    const hrs: number[] = [];
+    const re = /<Trackpoint>([\s\S]*?)<\/Trackpoint>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(xml)) !== null) {
+      const t = m[1].match(/<Time>([^<]+)<\/Time>/);
+      const h = m[1].match(/<HeartRateBpm[^>]*>\s*<Value>(\d+)<\/Value>/);
+      if (t && h) {
+        const ms = Date.parse(t[1]);
+        const bpm = Number(h[1]);
+        if (Number.isFinite(ms) && bpm >= 30 && bpm <= 230) {
+          times.push(ms);
+          hrs.push(bpm);
+        }
+      }
+    }
+
+    if (hrs.length < 3) {
+      debug.tcx = `nessun battito (${hrs.length} punti)`;
+      return null;
+    }
+
+    // Ricampiona a passo costante
+    const total = Math.max(1, Math.round((times[times.length - 1] - times[0]) / 1000));
+    const step = Math.max(1, Math.ceil(total / Math.min(MAX_POINTS, hrs.length)));
+    const n = Math.floor(total / step) + 1;
+    const values: number[] = [];
+    let j = 0;
+    for (let i = 0; i < n; i++) {
+      const target = times[0] + i * step * 1000;
+      while (j < times.length - 1 && times[j + 1] <= target) j++;
+      values.push(hrs[j]);
+    }
+    debug.tcx = `ok ${hrs.length} punti`;
+    return { rate: step, values };
+  } catch (e) {
+    debug.tcx = `errore: ${String(e).slice(0, 80)}`;
+    return null;
+  }
 }
 
 // Se Polar manda le zone a zero, il tempo in ogni zona si calcola dai campioni
@@ -189,14 +275,19 @@ function downsample(series: Series): Series {
 }
 
 // detailed = true se l'esercizio è stato scaricato con i campioni
-function toRow(userId: string, ex: any, detailed: boolean) {
+function toRow(
+  userId: string,
+  ex: any,
+  detailed: boolean,
+  series: Series | null,
+  debug: Record<string, unknown>
+) {
   if (!ex?.id || !ex?.start_time) return null;
   const start = String(ex.start_time); // ora locale, es. 2026-10-05T17:30:00
   const hour = Number(start.slice(11, 13));
   const avgHr = num(ex.heart_rate?.average);
 
   const zones = parseZones(ex.heart_rate_zones);
-  const series = detailed ? pickHeartRate(ex.samples, avgHr) : null;
 
   const polarTotal = zones.reduce((a, z) => a + z.seconds, 0);
   const hasLimits = zones.length > 0 && zones.every((z) => z.lower !== null && z.upper !== null);
@@ -212,8 +303,7 @@ function toRow(userId: string, ex: any, detailed: boolean) {
     '| zone:', zones.length,
     '| secondi da Polar:', polarTotal,
     '| limiti:', hasLimits,
-    '| tipi campioni:', Array.isArray(ex.samples) ? ex.samples.map((s: any) => s?.['sample-type']).join(',') : 'nessuno',
-    '| frequenza cardiaca trovata:', !!series
+    '| debug:', JSON.stringify(debug)
   );
 
   return {
@@ -230,6 +320,7 @@ function toRow(userId: string, ex: any, detailed: boolean) {
     hr_samples: stored ? stored.values : [],
     // null = campioni da scaricare ancora, 0 = scaricati ma senza frequenza cardiaca
     hr_rate: detailed ? (stored ? stored.rate : 0) : null,
+    debug,
   };
 }
 
@@ -269,22 +360,33 @@ async function syncUser(userId: string, token: string) {
   // Cosa abbiamo già salvato
   const { data: stored } = await admin
     .from('polar_exercises')
-    .select('polar_exercise_id, hr_rate, start_time')
+    .select('polar_exercise_id, hr_rate, start_time, created_at')
     .eq('user_id', userId);
   const storedRows = (stored ?? []) as {
     polar_exercise_id: string;
     hr_rate: number | null;
     start_time: string;
+    created_at: string | null;
   }[];
-  const done = new Set(storedRows.filter((r) => r.hr_rate !== null).map((r) => r.polar_exercise_id));
 
-  // Solo gli allenamenti senza campioni vengono scaricati (e salvati) di nuovo
-  const rows = [];
+  const recent = (iso: string | null) =>
+    iso ? Date.now() - Date.parse(iso) < RETRY_DAYS * 86400000 : false;
+  // "fatto" = campioni già scaricati; se la frequenza cardiaca mancava, si riprova per qualche giorno
+  const done = new Set(
+    storedRows
+      .filter((r) => r.hr_rate !== null && !(r.hr_rate === 0 && recent(r.created_at)))
+      .map((r) => r.polar_exercise_id)
+  );
+
+  const rows: any[] = [];
   for (const ex of exercises) {
     if (!ex?.id || done.has(String(ex.id))) continue;
 
     let full = ex;
     let detailed = false;
+    let series: Series | null = null;
+    const debug: Record<string, unknown> = {};
+
     try {
       const r = await polarGet(
         `/exercises/${encodeURIComponent(String(ex.id))}?zones=true&samples=true`,
@@ -293,21 +395,41 @@ async function syncUser(userId: string, token: string) {
       if (r.ok) {
         full = await r.json();
         detailed = true;
+        const dur = isoToSeconds(full.duration);
+        debug.samples = describeSamples(full.samples);
+        series = pickHeartRate(full.samples, num(full.heart_rate?.average), dur);
+        debug.source = series ? 'campioni' : null;
+        if (!series) {
+          series = await hrFromTcx(String(ex.id), token, debug);
+          if (series) debug.source = 'tcx';
+        }
       } else {
+        debug.dettaglio = `HTTP ${r.status}`;
         console.error('Dettaglio esercizio non disponibile', ex.id, r.status);
       }
     } catch (e) {
+      debug.dettaglio = `errore: ${String(e).slice(0, 80)}`;
       console.error('Errore nel dettaglio esercizio', ex.id, e);
     }
 
-    const row = toRow(userId, full, detailed);
+    const row = toRow(userId, full, detailed, series, debug);
     if (row) rows.push(row);
   }
 
   if (rows.length > 0) {
-    const { error } = await admin
+    let { error } = await admin
       .from('polar_exercises')
-      .upsert(rows as Record<string, unknown>[], { onConflict: 'user_id,polar_exercise_id' });
+      .upsert(rows, { onConflict: 'user_id,polar_exercise_id' });
+
+    // Se la colonna "debug" non esiste ancora, si salva senza
+    if (error && /debug/i.test(error.message)) {
+      ({ error } = await admin
+        .from('polar_exercises')
+        .upsert(
+          rows.map(({ debug: _unused, ...rest }) => rest),
+          { onConflict: 'user_id,polar_exercise_id' }
+        ));
+    }
     if (error) return { ok: false, status: 500, error: error.message };
   }
 
